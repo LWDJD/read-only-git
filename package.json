@@ -1,0 +1,14 @@
+{
+  "name": "read-only-git",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "A portable read-only Git browser for static hosts (Arweave / IPFS / Cloudflare Pages / EdgeOne)",
+  "scripts": {
+    "dev": "node scripts/serve.mjs public 4173",
+    "serve": "node scripts/serve.mjs public 4173",
+    "dev:vite": "vite",
+    "prepare-repo": "python scripts/prepare-repo.py",
+    "selftest": "node scripts/selftest.mjs tmp/bare.git"
+  }
+}

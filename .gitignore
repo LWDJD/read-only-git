@@ -1,0 +1,9 @@
+# 依赖
+node_modules/
+
+# 开发期临时产物
+tmp/
+.test/
+
+# 部署产物：裸仓库由 prepare-repo 脚本生成，不进版本库
+public/*.git/
