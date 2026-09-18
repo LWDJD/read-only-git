@@ -200,7 +200,8 @@ public/src/git/
 `RemoteRepo` 接受 `baseUrl` 和可注入的 `fetch`，所以能在 Node 环境跑：
 
 ```bash
-node scripts/selftest.mjs tmp/bare.git
+node scripts/selftest.mjs                 # 自建 fixture，用完即删
+node scripts/selftest.mjs <裸仓库目录>     # 或指定一个现成的
 ```
 
 它会走一遍 pack 加载、refs 解析、tree 递归、blob 解压、提交历史。
