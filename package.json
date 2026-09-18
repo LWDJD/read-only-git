@@ -5,10 +5,10 @@
   "type": "module",
   "description": "A portable read-only Git browser for static hosts (Arweave / IPFS / Cloudflare Pages / EdgeOne)",
   "scripts": {
-    "dev": "node scripts/serve.mjs public 4173",
-    "serve": "node scripts/serve.mjs public 4173",
+    "dev": "node scripts/serve.mjs",
+    "serve": "node scripts/serve.mjs",
     "dev:vite": "vite",
     "prepare-repo": "python scripts/prepare-repo.py",
-    "selftest": "node scripts/selftest.mjs tmp/bare.git"
+    "selftest": "node scripts/selftest.mjs"
   }
 }

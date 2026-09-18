@@ -40,7 +40,15 @@ objects/pack/*.idx
 }
 ```
 
-命名约定：磁盘上的目录以 `.git` 结尾，JSON 和 URL 里用裸名。前端对两种写法都做了归一化，但请按裸名写。空、`.`、`..`、含路径分隔符的条目会被忽略。
+命名约定：`.git` 是目录后缀，不是仓库名的一部分。
+
+| 位置 | 形式 | 例子 |
+|---|---|---|
+| 磁盘目录 | 带后缀 | `p2ping.git/` |
+| `repository.json` / URL / 界面显示 | 裸名 | `p2ping` |
+| clone 地址 | 带后缀 | `<站点>/p2ping.git` |
+
+前端对 JSON 里的两种写法都做了归一化，但请按裸名写。空、`.`、`..`、含路径分隔符的条目会被忽略。
 
 ## 用法
 
@@ -52,6 +60,17 @@ python scripts/prepare-repo.py ../p2ping public p2ping
 ```
 
 三个参数依次是源仓库、输出目录（默认 `public`）、仓库名（默认取源目录名）。只依赖 Python 3 标准库和 PATH 里的 git，Windows / macOS / Linux 通用。
+
+**输出目录要指向站点根**，也就是放着 `index.html` 的那个目录。脚本只管仓库，不管前端：往空目录里跑也能生成，但那个目录还不能直接部署，脚本会在结尾提醒你补上 `index.html` 和 `src/`。
+
+```
+你的项目/            ← 从仓库克隆下来就是这样
+  public/            ← 部署根，index.html 和 src/ 在这
+    index.html
+    src/
+```
+
+所以第一次搭建时，先准备好站点骨架，再让脚本往里面写仓库。
 
 脚本做的事：裸仓库输出到 `<输出目录>/<仓库名>.git/` → `repack -a -d` 把对象收进单 pack → `gc --prune=now` → `update-server-info` 生成索引 → 清掉协议用不到的文件 → 校验并打印清单 → 更新 `repository.json`。
 
@@ -100,11 +119,12 @@ git symbolic-ref HEAD <ref>
 ### 2. 本地预览
 
 ```bash
-node scripts/serve.mjs public 4173
+node scripts/serve.mjs                  # 默认根目录 ../public，端口 4173
+node scripts/serve.mjs <根目录> <端口>
 # http://localhost:4173/
 ```
 
-支持 Range 请求（dumb 协议会用它做局部下载）。
+不传根目录时它取脚本旁边的 `../public`，所以在哪个目录调用都行。支持 Range 请求（dumb 协议会用它做局部下载）。
 
 ### 3. 部署
 
@@ -181,7 +201,8 @@ public/src/git/
 `RemoteRepo` 接受 `baseUrl` 和可注入的 `fetch`，所以能在 Node 环境跑：
 
 ```bash
-node scripts/selftest.mjs tmp/bare.git
+node scripts/selftest.mjs                 # 自建 fixture，用完即删
+node scripts/selftest.mjs <裸仓库目录>     # 或指定一个现成的
 ```
 
 它会走一遍 pack 加载、refs 解析、tree 递归、blob 解压、提交历史。
@@ -189,6 +210,7 @@ node scripts/selftest.mjs tmp/bare.git
 ## 已知限制
 
 - **只读**。协议层面没有 push 路径，这正是它能用纯静态文件托管的原因
+- **源仓库不能是浅克隆**。`git clone --depth` 拉下来的历史不完整，`repack` 遍历父提交时会失败。脚本会提前拦住并提示 `fetch --unshallow`
 - **整包下载**。packfile 一次性载入内存，几十 MB 会卡。要优化得解析 `.idx` 后按 Range 惰性取对象
 - **不支持 shallow clone**。`--depth` 依赖服务端裁剪历史
 - **不能选择性公开**。`info/refs` 列出仓库里所有 refs，不想公开的分支要在打包前清掉
