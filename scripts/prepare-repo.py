@@ -2,14 +2,16 @@
 """把一个普通 git 仓库转换成可直接静态托管的裸仓库。
 
 用法:
-    python scripts/prepare-repo.py <源仓库路径> [输出目录] [仓库名]
+    python scripts/prepare-repo.py <源仓库> [输出目录] [仓库名]
+
+参数:
+    <源仓库>      必填。要转换的仓库路径，普通仓库和裸仓库都行。
+    [输出目录]    默认取脚本旁边的 ../public。站点根目录，即放着 index.html 的那个。
+    [仓库名]      默认取源目录名。带不带 .git 后缀等价。
 
 产出:
     <输出目录>/<仓库名>.git/     dumb HTTP 协议所需的最小文件集
     <输出目录>/repository.json   仓库清单，已存在则合并
-
-产出目录可以直接丢到任何静态托管上：
-    Arweave / IPFS / Cloudflare Pages / EdgeOne / nginx ...
 
 只依赖 Python 3 标准库和 PATH 里的 git，不依赖 shell 方言。
 """
@@ -232,15 +234,21 @@ def save_registry(path: Path, entries: list[dict]) -> None:
 def usage(exit_code: int = 0) -> None:
     print("""用法: python scripts/prepare-repo.py <源仓库> [输出目录] [仓库名]
 
+参数:
+  <源仓库>      必填。要转换的仓库路径，普通仓库和裸仓库都行。
+  [输出目录]    默认取脚本旁边的 ../public。站点根目录，即放着 index.html 的那个。
+  [仓库名]      默认取源目录名。带不带 .git 后缀等价。
+
 示例:
-  python scripts/prepare-repo.py ../p2ping
-  python scripts/prepare-repo.py ../p2ping public p2ping
+  python scripts/prepare-repo.py ../p2ping                  # 只给源仓库
+  python scripts/prepare-repo.py ../p2ping site             # 指定输出目录
+  python scripts/prepare-repo.py ../p2ping site my-repo     # 三个都指定
 
 说明:
-  输出目录省略时取脚本旁边的 ../public，跟从哪个目录调用无关。
-
-  输出目录里会多出一个 <仓库名>.git/ 目录以及（必要时）repository.json。
+  产出 <输出目录>/<仓库名>.git/ 和（必要时）repository.json，
   把整个输出目录部署到任意静态托管即可。
+
+  输出目录里如果没有 index.html，说明还缺前端文件，脚本会在结尾提醒。
 
   重复执行是安全的：同名仓库会被覆盖重建，而 repository.json 里该条目的
   description 会保留下来。""")

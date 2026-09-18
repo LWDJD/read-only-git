@@ -54,25 +54,49 @@ objects/pack/*.idx
 
 ### 1. 生成可托管的仓库
 
+```
+python scripts/prepare-repo.py <源仓库> [输出目录] [仓库名]
+```
+
+| 参数 | 必填 | 默认 | 说明 |
+|---|---|---|---|
+| `<源仓库>` | 是 | | 要转换的仓库路径，普通仓库和裸仓库都行 |
+| `[输出目录]` | 否 | 脚本旁边的 `../public` | 站点根目录，也就是放着 `index.html` 的那个 |
+| `[仓库名]` | 否 | 源目录名 | 对外标识，带不带 `.git` 后缀等价 |
+
+尖括号是必填，方括号是可省略。三个参数按位置传，没有选项开关，`-h` 看用法。
+
 ```bash
+# 只给源仓库，其余两个用默认值
 python scripts/prepare-repo.py ../p2ping
-python scripts/prepare-repo.py ../p2ping public p2ping
+
+# 指定输出目录
+python scripts/prepare-repo.py ../p2ping site
+
+# 三个都指定
+python scripts/prepare-repo.py ../p2ping site my-repo
 ```
 
-三个参数依次是源仓库、输出目录（默认 `public`）、仓库名（默认取源目录名）。只依赖 Python 3 标准库和 PATH 里的 git，Windows / macOS / Linux 通用。
+只依赖 Python 3 标准库和 PATH 里的 git，Windows / macOS / Linux 通用。
 
-**输出目录要指向站点根**，也就是放着 `index.html` 的那个目录。脚本只管仓库，不管前端：往空目录里跑也能生成，但那个目录还不能直接部署，脚本会在结尾提醒你补上 `index.html` 和 `src/`。
+#### 为什么输出目录要指向站点根
+
+脚本只生成裸仓库和 `repository.json`，不碰前端。所以输出目录得是**放着 `index.html` 的那个目录**，否则产物没法直接部署：
 
 ```
-你的项目/            ← 从仓库克隆下来就是这样
-  public/            ← 部署根，index.html 和 src/ 在这
-    index.html
-    src/
+你的项目/
+  public/                 ← 站点根
+    index.html            ┐ 前端，仓库还没下载时就得有
+    src/                  ┘
+    p2ping.git/           ← 脚本写进来的
+    repository.json       ← 脚本维护的
 ```
 
-所以第一次搭建时，先准备好站点骨架，再让脚本往里面写仓库。
+往空目录里跑也能生成，但脚本会在结尾提醒你还缺 `index.html`。第一次搭建时先把站点骨架准备好，再往里面写仓库。
 
-脚本做的事：裸仓库输出到 `<输出目录>/<仓库名>.git/` → `repack -a -d` 把对象收进单 pack → `gc --prune=now` → `update-server-info` 生成索引 → 清掉协议用不到的文件 → 校验并打印清单 → 更新 `repository.json`。
+#### 它做的事
+
+裸仓库输出到 `<输出目录>/<仓库名>.git/` → `repack -a -d` 把对象收进单 pack → `gc --prune=now` → `update-server-info` 生成索引 → 清掉协议用不到的文件 → 校验并打印清单 → 更新 `repository.json`。
 
 重复执行安全：同名仓库覆盖重建，`repository.json` 里那条的 `description` 会保留。
 
@@ -118,13 +142,21 @@ git symbolic-ref HEAD <ref>
 
 ### 2. 本地预览
 
-```bash
-node scripts/serve.mjs                  # 默认根目录 ../public，端口 4173
-node scripts/serve.mjs <根目录> <端口>
-# http://localhost:4173/
+```
+node scripts/serve.mjs [根目录] [端口]
 ```
 
-不传根目录时它取脚本旁边的 `../public`，所以在哪个目录调用都行。支持 Range 请求（dumb 协议会用它做局部下载）。
+| 参数 | 必填 | 默认 | 说明 |
+|---|---|---|---|
+| `[根目录]` | 否 | 脚本旁边的 `../public` | 要服务的目录 |
+| `[端口]` | 否 | `4173` | |
+
+```bash
+node scripts/serve.mjs                        # http://localhost:4173/
+node scripts/serve.mjs site 4200              # 换目录和端口
+```
+
+根目录取自脚本自身位置，所以在哪个目录调用都行。行为跟真实静态托管对齐，包括对 Range 请求的支持（dumb 协议会用它做局部下载）。
 
 ### 3. 部署
 
