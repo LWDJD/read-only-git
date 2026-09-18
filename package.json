@@ -9,6 +9,6 @@
     "serve": "node scripts/serve.mjs public 4173",
     "dev:vite": "vite",
     "prepare-repo": "python scripts/prepare-repo.py",
-    "selftest": "node scripts/selftest.mjs tmp/bare.git"
+    "selftest": "node scripts/selftest.mjs"
   }
 }
