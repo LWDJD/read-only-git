@@ -2,7 +2,7 @@
 """把一个普通 git 仓库转换成可直接静态托管的裸仓库。
 
 用法:
-    python scripts/prepare-repo.py <源仓库路径> [输出目录=public] [仓库名]
+    python scripts/prepare-repo.py <源仓库路径> [输出目录] [仓库名]
 
 产出:
     <输出目录>/<仓库名>.git/     dumb HTTP 协议所需的最小文件集
@@ -230,13 +230,15 @@ def save_registry(path: Path, entries: list[dict]) -> None:
 
 
 def usage(exit_code: int = 0) -> None:
-    print("""用法: python scripts/prepare-repo.py <源仓库> [输出目录=public] [仓库名]
+    print("""用法: python scripts/prepare-repo.py <源仓库> [输出目录] [仓库名]
 
 示例:
   python scripts/prepare-repo.py ../p2ping
   python scripts/prepare-repo.py ../p2ping public p2ping
 
 说明:
+  输出目录省略时取脚本旁边的 ../public，跟从哪个目录调用无关。
+
   输出目录里会多出一个 <仓库名>.git/ 目录以及（必要时）repository.json。
   把整个输出目录部署到任意静态托管即可。
 
@@ -250,8 +252,12 @@ def main(argv: list[str]) -> int:
         usage(0 if argv else 1)
 
     src_arg = argv[0]
-    out_arg = argv[1] if len(argv) > 1 else "public"
     name_arg = argv[2] if len(argv) > 2 else None
+
+    # 默认输出目录取脚本旁边的 ../public，跟从哪个目录调用无关。
+    # 否则 cd 到别处跑就会往错误的地方写。
+    script_dir = Path(__file__).resolve().parent
+    out_arg = argv[1] if len(argv) > 1 else script_dir.parent / "public"
 
     src = Path(src_arg).expanduser().resolve()
     out_root = Path(out_arg).expanduser().resolve()

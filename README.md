@@ -119,11 +119,12 @@ git symbolic-ref HEAD <ref>
 ### 2. 本地预览
 
 ```bash
-node scripts/serve.mjs public 4173
+node scripts/serve.mjs                  # 默认根目录 ../public，端口 4173
+node scripts/serve.mjs <根目录> <端口>
 # http://localhost:4173/
 ```
 
-支持 Range 请求（dumb 协议会用它做局部下载）。
+不传根目录时它取脚本旁边的 `../public`，所以在哪个目录调用都行。支持 Range 请求（dumb 协议会用它做局部下载）。
 
 ### 3. 部署
 
