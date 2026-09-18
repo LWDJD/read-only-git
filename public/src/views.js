@@ -26,6 +26,14 @@ function firstLine(commit) {
   return stripMarkdown(line) || '(无提交说明)'
 }
 
+/**
+ * 展示用的仓库名。磁盘目录叫 p2ping.git，但那是目录名，不是仓库名。
+ * `.git` 只出现在 clone 地址里，标题、面包屑、列表都用裸名。
+ */
+function repoLabel(name) {
+  return stripGitSuffix(name)
+}
+
 /** tree 里除了目录，还有 symlink / submodule，这里只认普通文件 */
 function isFileEntry(entry) {
   return entry.kind === 'file' || entry.kind === 'exec'
@@ -58,7 +66,7 @@ function repoHeader({ name, description }) {
   return h('header', { class: 'repo-header' },
     h('div', { class: 'repo-title' },
       h('span', { class: 'repo-mark', text: '⬢' }),
-      h('span', { class: 'repo-name', text: `${stripGitSuffix(name)}.git` }),
+      h('span', { class: 'repo-name', text: repoLabel(name) }),
       h('span', { class: 'pill pill-muted', text: '只读' }),
     ),
     description ? h('p', { class: 'repo-desc', text: description }) : null,
@@ -163,7 +171,7 @@ function releasesPanel({ name, tags }) {
  */
 async function repoPage(app, ctx, { name, active, ref, crumbs, build }) {
   ctx.setCrumbs(crumbs)
-  renderLoading(app, `打开 ${stripGitSuffix(name)}.git …`)
+  renderLoading(app, `打开 ${repoLabel(name)} …`)
 
   const chrome = await loadChrome(name)
   const license = await detectRootLicense(chrome.repo, chrome.headSha)
@@ -221,7 +229,7 @@ export async function viewHome(app, ctx) {
     h('ul', { class: 'repo-list' },
       repositories.map(entry => h('li', {},
         h('a', { href: repoHref(entry.name) },
-          h('div', { class: 'name', text: `${entry.name}.git` }),
+          h('div', { class: 'name', text: entry.name }),
           entry.description ? h('div', { class: 'desc', text: entry.description }) : null,
         ),
       )),
@@ -237,7 +245,7 @@ export async function viewRepo(app, ctx, route) {
   await repoPage(app, ctx, {
     name,
     active: 'code',
-    crumbs: [{ text: `${stripGitSuffix(name)}.git`, href: repoHref(name) }],
+    crumbs: [{ text: repoLabel(name), href: repoHref(name) }],
     build: async (chrome, ref) => {
       const entries = await chrome.repo.listDirectory(chrome.headSha, '')
       const docs = findDocs(entries, '')
@@ -257,7 +265,7 @@ export async function viewTree(app, ctx, route) {
   const ref = route.ref
   const path = route.path
 
-  const crumbs = [{ text: `${stripGitSuffix(name)}.git`, href: repoHref(name) }]
+  const crumbs = [{ text: repoLabel(name), href: repoHref(name) }]
   if (path) crumbs.push({ text: path, href: treeHref(name, ref, path) })
 
   await repoPage(app, ctx, {
@@ -286,7 +294,7 @@ export async function viewBlob(app, ctx, route) {
   await repoPage(app, ctx, {
     name, active: 'code', ref,
     crumbs: [
-      { text: `${stripGitSuffix(name)}.git`, href: repoHref(name) },
+      { text: repoLabel(name), href: repoHref(name) },
       { text: path, href: blobHref(name, ref, path) },
     ],
     build: async (chrome) => {
@@ -331,7 +339,7 @@ export async function viewCommits(app, ctx, route) {
   await repoPage(app, ctx, {
     name, active: 'commits', ref,
     crumbs: [
-      { text: `${stripGitSuffix(name)}.git`, href: repoHref(name) },
+      { text: repoLabel(name), href: repoHref(name) },
       { text: '提交' },
     ],
     build: async (chrome) => {
@@ -377,7 +385,7 @@ export async function viewBranches(app, ctx, route) {
   await repoPage(app, ctx, {
     name, active: 'branches',
     crumbs: [
-      { text: `${stripGitSuffix(name)}.git`, href: repoHref(name) },
+      { text: repoLabel(name), href: repoHref(name) },
       { text: '分支' },
     ],
     build: async (chrome) => {
@@ -432,7 +440,7 @@ export async function viewTags(app, ctx, route) {
   await repoPage(app, ctx, {
     name, active: 'tags',
     crumbs: [
-      { text: `${stripGitSuffix(name)}.git`, href: repoHref(name) },
+      { text: repoLabel(name), href: repoHref(name) },
       { text: '标签' },
     ],
     build: async (chrome) => {
@@ -605,7 +613,7 @@ function docsPanel(repo, sha, docs) {
 
 function breadcrumbHeader(name, ref, path) {
   const parts = String(path || '').split('/').filter(Boolean)
-  const nodes = [link(repoHref(name), `${stripGitSuffix(name)}.git`)]
+  const nodes = [link(repoHref(name), repoLabel(name))]
 
   let acc = ''
   for (const part of parts) {
