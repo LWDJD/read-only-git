@@ -3,7 +3,9 @@
  * 零依赖静态服务器，用于本地预览与端到端测试。
  *
  * 用法:
- *   node scripts/serve.mjs [根目录=public] [端口=4173]
+ *   node scripts/serve.mjs [根目录] [端口=4173]
+ *
+ *   根目录省略时取脚本旁边的 ../public，跟从哪个目录调用无关。
  *
  * 刻意不依赖任何 npm 包：这个项目的目标是在任何静态托管上跑，
  * 本地预览也不应该需要构建工具。
@@ -15,9 +17,11 @@
  */
 import { createServer } from 'node:http'
 import { createReadStream, promises as fs } from 'node:fs'
-import { extname, join, normalize, resolve, sep } from 'node:path'
+import { dirname, extname, join, normalize, resolve, sep } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-const root = resolve(process.argv[2] || 'public')
+const here = dirname(fileURLToPath(import.meta.url))
+const root = resolve(process.argv[2] || join(here, '..', 'public'))
 const port = Number(process.argv[3] || 4173)
 
 const MIME = {
@@ -132,7 +136,7 @@ server.on('error', (err) => {
   if (err.code === 'EADDRINUSE') {
     console.error(`端口 ${port} 已被占用。`)
     console.error('换一个端口重试：')
-    console.error(`  node scripts/serve.mjs ${process.argv[2] || 'public'} ${Number(port) + 1}`)
+    console.error(`  node scripts/serve.mjs "${root}" ${Number(port) + 1}`)
     console.error('（Windows 上可以先用 netstat -ano | findstr :' + port + ' 找出占用进程）')
     process.exit(1)
   }
