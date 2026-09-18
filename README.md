@@ -53,6 +53,17 @@ python scripts/prepare-repo.py ../p2ping public p2ping
 
 三个参数依次是源仓库、输出目录（默认 `public`）、仓库名（默认取源目录名）。只依赖 Python 3 标准库和 PATH 里的 git，Windows / macOS / Linux 通用。
 
+**输出目录要指向站点根**，也就是放着 `index.html` 的那个目录。脚本只管仓库，不管前端：往空目录里跑也能生成，但那个目录还不能直接部署，脚本会在结尾提醒你补上 `index.html` 和 `src/`。
+
+```
+你的项目/            ← 从仓库克隆下来就是这样
+  public/            ← 部署根，index.html 和 src/ 在这
+    index.html
+    src/
+```
+
+所以第一次搭建时，先准备好站点骨架，再让脚本往里面写仓库。
+
 脚本做的事：裸仓库输出到 `<输出目录>/<仓库名>.git/` → `repack -a -d` 把对象收进单 pack → `gc --prune=now` → `update-server-info` 生成索引 → 清掉协议用不到的文件 → 校验并打印清单 → 更新 `repository.json`。
 
 重复执行安全：同名仓库覆盖重建，`repository.json` 里那条的 `description` 会保留。
@@ -189,6 +200,7 @@ node scripts/selftest.mjs tmp/bare.git
 ## 已知限制
 
 - **只读**。协议层面没有 push 路径，这正是它能用纯静态文件托管的原因
+- **源仓库不能是浅克隆**。`git clone --depth` 拉下来的历史不完整，`repack` 遍历父提交时会失败。脚本会提前拦住并提示 `fetch --unshallow`
 - **整包下载**。packfile 一次性载入内存，几十 MB 会卡。要优化得解析 `.idx` 后按 Range 惰性取对象
 - **不支持 shallow clone**。`--depth` 依赖服务端裁剪历史
 - **不能选择性公开**。`info/refs` 列出仓库里所有 refs，不想公开的分支要在打包前清掉

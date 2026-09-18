@@ -94,6 +94,24 @@ def is_valid_name(name: str) -> bool:
     return "/" not in name and "\\" not in name
 
 
+def check_source(src: Path) -> None:
+    """确认源仓库可用。报错要在打包前给出，而不是等 git 吐内部错误。"""
+    if not (src / ".git").exists() and not (src / "HEAD").exists():
+        raise Failure(f"不是 git 仓库: {src}")
+
+    # 浅克隆只有部分历史，repack 遍历父提交时会报 Could not read <sha>，
+    # 那句话看不出是深度造成的，所以在这里提前拦下。
+    if (src / ".git" / "shallow").exists() or (src / "shallow").exists():
+        raise Failure(
+            "源仓库是浅克隆，历史不完整，打包会失败。\n"
+            f'  先补全历史： git -C "{src}" fetch --unshallow\n'
+            "  或者重新完整克隆一次。"
+        )
+
+    if not try_git(["rev-parse", "--git-dir"], src)[0]:
+        raise Failure(f"这个目录不是一个可用的 git 仓库: {src}")
+
+
 def build_bare(src: Path, target: Path) -> str:
     """把源仓库变成裸仓库，返回用了哪条链路。"""
     # 首选 clone --bare
@@ -245,8 +263,7 @@ def main(argv: list[str]) -> int:
     if not is_valid_name(name):
         raise Failure(f"非法仓库名: {name!r}")
 
-    if not (src / ".git").exists() and not (src / "HEAD").exists():
-        raise Failure(f"不是 git 仓库: {src}")
+    check_source(src)
 
     target = out_root / f"{name}.git"
 
@@ -301,6 +318,13 @@ def main(argv: list[str]) -> int:
     print(f"v 完成。默认分支 {head}，可直接部署 {out_root}")
     print()
     print(f"  git clone <你的站点>/{name}.git")
+
+    # 脚本只管仓库，不管前端。输出目录得自己带 index.html 才能当站点用。
+    if not (out_root / "index.html").exists():
+        print()
+        print(f"! {out_root} 里没有 index.html，现在还不能直接当站点部署。")
+        print("  还差前端文件：把项目里的 index.html 和 src/ 放进同一个目录。")
+
     print()
     return 0
 
