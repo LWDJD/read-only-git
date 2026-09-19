@@ -5,5 +5,11 @@ node_modules/
 tmp/
 .test/
 
+# 编辑器与语言运行时缓存
+.idea/
+.vscode/
+__pycache__/
+*.pyc
+
 # 部署产物：裸仓库由 prepare-repo 脚本生成，不进版本库
 public/*.git/
