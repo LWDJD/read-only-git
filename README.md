@@ -55,29 +55,37 @@ objects/pack/*.idx
 ### 1. 生成可托管的仓库
 
 ```
-python scripts/prepare-repo.py <源仓库> [输出目录] [仓库名]
+python scripts/prepare-repo.py <源> [输出目录] [仓库名]
 ```
 
 | 参数 | 必填 | 默认 | 说明 |
 |---|---|---|---|
-| `<源仓库>` | 是 | | 要转换的仓库路径，普通仓库和裸仓库都行 |
+| `<源>` | 是 | | 本地路径（普通仓库或裸仓库），或远端地址 |
 | `[输出目录]` | 否 | 脚本旁边的 `../public` | 站点根目录，也就是放着 `index.html` 的那个 |
-| `[仓库名]` | 否 | 源目录名 | 对外标识，带不带 `.git` 后缀等价 |
+| `[仓库名]` | 否 | 本地取目录名，远端取地址末段 | 对外标识，带不带 `.git` 后缀等价 |
 
 尖括号是必填，方括号是可省略。三个参数按位置传，没有选项开关，`-h` 看用法。
 
 ```bash
-# 只给源仓库，其余两个用默认值
+# 本地仓库
 python scripts/prepare-repo.py ../p2ping
 
-# 指定输出目录
-python scripts/prepare-repo.py ../p2ping site
+# 远端仓库，直接复刻一份静态版本
+python scripts/prepare-repo.py https://github.com/LWDJD/p2ping.git
 
-# 三个都指定
-python scripts/prepare-repo.py ../p2ping site my-repo
+# 指定输出目录和名字
+python scripts/prepare-repo.py git@github.com:LWDJD/p2ping.git site p2ping
 ```
 
 只依赖 Python 3 标准库和 PATH 里的 git，Windows / macOS / Linux 通用。
+
+#### 远端地址
+
+支持 `https://` `git://` `ssh://` `file://`，以及 scp 风格的 `user@host:path`。
+
+远端模式下脚本直接 `git clone --bare`，**拿到的是那个仓库的全部分支和标签**，不只是你本地 checkout 过的那几个。所以想给一个远端仓库做静态镜像，一条命令就够，不用先手动 clone 再转换。
+
+私有仓库得先让 git 自己拿到凭据（credential helper 或 SSH key），脚本不处理认证。远端不可达或凭据不对时，git 的报错会原样带出来。
 
 #### 为什么输出目录要指向站点根
 
