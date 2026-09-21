@@ -277,7 +277,10 @@ export async function viewTree(app, ctx, route) {
 
       return [
         breadcrumbHeader(name, ref, path),
-        fileBox({ name, ref, commit: chrome.commit, entries, path }),
+        fileBox({
+          name, ref, commit: chrome.commit, entries, path,
+          heads: chrome.heads, tags: chrome.tags,
+        }),
         docs.length ? docsPanel(chrome.repo, sha, docs) : null,
       ]
     },
@@ -494,10 +497,10 @@ export async function viewTags(app, ctx, route) {
 
 /* --- 片段 ---------------------------------------------------------------- */
 
-function fileBox({ name, ref, commit, entries, path = '' }) {
+function fileBox({ name, ref, commit, entries, path = '', heads = [], tags = [] }) {
   return h('div', { class: 'panel' },
     h('div', { class: 'file-toolbar' },
-      h('span', { class: 'branch-chip', text: ref }),
+      refPicker({ name, ref, heads, tags }),
       h('span', { class: 'toolbar-commit' },
         link(commitsHref(name, ref), firstLine(commit)),
         h('span', { class: 'muted', text: ` · ${shortSha(commit.sha)}` }),
@@ -609,6 +612,85 @@ function docsPanel(repo, sha, docs) {
   select(0)
 
   return h('div', { class: 'panel docs-panel' }, tabs, body)
+}
+
+/* --- ref 选择器 ---------------------------------------------------------- */
+
+// 同一时刻只开一个下拉。
+let closeCurrentRefMenu = null
+
+function closeRefMenus() {
+  if (closeCurrentRefMenu) {
+    closeCurrentRefMenu()
+    closeCurrentRefMenu = null
+  }
+}
+
+document.addEventListener('click', closeRefMenus)
+
+/**
+ * ref 选择器：按钮上显示当前 ref，点开展开可切换的分支与标签。
+ *
+ * 下拉里刻意只列分支和标签，不列提交——GitHub 也是如此。
+ * 当前 ref 具体是某个 sha 时，只体现在按钮文字上，不往下拉里塞，
+ * 免得列表混进一堆提交流。
+ */
+function refPicker({ name, ref, heads, tags }) {
+  const items = []
+
+  if (heads.length) {
+    items.push(h('div', { class: 'ref-menu-title', text: '分支' }))
+    for (const head of heads) {
+      items.push(refMenuItem(name, head.name, ref))
+    }
+  }
+  if (tags.length) {
+    items.push(h('div', { class: 'ref-menu-title', text: '标签' }))
+    for (const tag of tags) {
+      items.push(refMenuItem(name, tag.name, ref))
+    }
+  }
+  if (!items.length) {
+    items.push(h('div', { class: 'ref-menu-title', text: '没有其他 ref' }))
+  }
+
+  const menu = h('div', { class: 'ref-menu', hidden: true }, items)
+  const btn = h('button', {
+    class: 'branch-chip ref-button',
+    type: 'button',
+    'aria-haspopup': 'true',
+  }, h('span', { class: 'ref-button-label', text: ref }), h('span', { class: 'ref-caret', text: '▾' }))
+
+  const wrap = h('div', { class: 'ref-wrap' }, btn, menu)
+
+  const close = () => {
+    menu.hidden = true
+    wrap.classList.remove('is-open')
+  }
+
+  btn.addEventListener('click', (event) => {
+    event.stopPropagation()
+    const willOpen = menu.hidden
+    closeRefMenus()
+    if (willOpen) {
+      menu.hidden = false
+      wrap.classList.add('is-open')
+      closeCurrentRefMenu = close
+    }
+  })
+
+  // 点菜单内部不要冒泡到 document，否则刚开就被关掉
+  menu.addEventListener('click', (event) => event.stopPropagation())
+
+  return wrap
+}
+
+function refMenuItem(name, value, current) {
+  return h('a', {
+    class: 'ref-menu-item' + (value === current ? ' is-current' : ''),
+    href: treeHref(name, value, ''),
+    text: value,
+  })
 }
 
 function breadcrumbHeader(name, ref, path) {

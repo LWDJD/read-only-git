@@ -249,9 +249,21 @@ h3 { font-size: 14px; font-weight: 600; margin: 0 0 8px; }
 .panel {
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  overflow: hidden;
   margin-bottom: 16px;
   background: var(--bg);
+}
+
+/* 面板不能用 overflow: hidden 来修圆角：那样会把内部浮层（比如 ref 下拉）
+   连同它溢出边框的部分一起剪掉，且被剪掉的部分点不到。
+   改成让首尾子元素各自贴合圆角。 */
+.panel > :first-child {
+  border-top-left-radius: calc(var(--radius) - 1px);
+  border-top-right-radius: calc(var(--radius) - 1px);
+}
+
+.panel > :last-child {
+  border-bottom-left-radius: calc(var(--radius) - 1px);
+  border-bottom-right-radius: calc(var(--radius) - 1px);
 }
 
 .panel-head {
@@ -297,6 +309,67 @@ h3 { font-size: 14px; font-weight: 600; margin: 0 0 8px; }
   border-radius: var(--radius);
   color: var(--text);
 }
+
+/* --- ref 选择器 ---------------------------------------------------------- */
+
+.ref-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.ref-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  font: inherit;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text);
+  padding: 3px 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.ref-button:hover { background: var(--bg-subtle); }
+
+.ref-caret {
+  font-size: 10px;
+  opacity: .65;
+}
+
+.ref-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 40;
+  min-width: 200px;
+  max-height: 320px;
+  overflow-y: auto;
+  padding: 6px 0;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .14);
+}
+
+.ref-menu-title {
+  padding: 6px 12px 3px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.ref-menu-item {
+  display: block;
+  padding: 5px 12px;
+  font-size: 13px;
+  color: var(--text);
+  text-decoration: none;
+}
+
+.ref-menu-item:hover { background: var(--bg-subtle); }
+.ref-menu-item.is-current { font-weight: 600; }
 
 .toolbar-commit {
   flex: 1;
