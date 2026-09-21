@@ -2,14 +2,17 @@
 """把一个普通 git 仓库转换成可直接静态托管的裸仓库。
 
 用法:
-    python scripts/prepare-repo.py <源仓库路径> [输出目录] [仓库名]
+    python scripts/prepare-repo.py <源仓库> [输出目录] [仓库名]
+
+参数:
+    <源仓库>      必填。本地路径（普通仓库或裸仓库），或远端地址
+                  （https:// / git:// / ssh:// / file:// / user@host:path）。
+    [输出目录]    默认取脚本旁边的 ../public。站点根目录，即放着 index.html 的那个。
+    [仓库名]      默认取源目录名；远端地址取地址末段。带不带 .git 后缀等价。
 
 产出:
     <输出目录>/<仓库名>.git/     dumb HTTP 协议所需的最小文件集
     <输出目录>/repository.json   仓库清单，已存在则合并
-
-产出目录可以直接丢到任何静态托管上：
-    Arweave / IPFS / Cloudflare Pages / EdgeOne / nginx ...
 
 只依赖 Python 3 标准库和 PATH 里的 git，不依赖 shell 方言。
 """
@@ -92,6 +95,24 @@ def is_valid_name(name: str) -> bool:
     if not name or name in (".", ".."):
         return False
     return "/" not in name and "\\" not in name
+
+
+# 远端地址的两种写法：带协议的 URL，和 scp 风格的 user@host:path
+REMOTE_URL = re.compile(r"^(https?|git|ssh|file)://", re.IGNORECASE)
+REMOTE_SCP = re.compile(r"^[\w.+-]+@[\w.-]+:")
+
+
+def is_remote(source: str) -> bool:
+    """Windows 路径如 D:\\x 不匹配 scp 模式（没有 @），不会被误判。"""
+    return bool(REMOTE_URL.match(source) or REMOTE_SCP.match(source))
+
+
+def remote_name(url: str) -> str:
+    """从远端地址里取仓库名：https://host/user/repo.git → repo"""
+    tail = url.rstrip("/\\").replace("\\", "/").split("/")[-1]
+    if ":" in tail:
+        tail = tail.split(":")[-1]
+    return normalize_name(tail)
 
 
 def check_source(src: Path) -> None:
@@ -232,15 +253,23 @@ def save_registry(path: Path, entries: list[dict]) -> None:
 def usage(exit_code: int = 0) -> None:
     print("""用法: python scripts/prepare-repo.py <源仓库> [输出目录] [仓库名]
 
+参数:
+  <源仓库>      必填。本地路径（普通仓库或裸仓库），或远端地址。
+                远端支持 https:// git:// ssh:// file:// 和 user@host:path。
+                远端会拿到那个仓库的全部分支和标签，包括你本地没有的。
+  [输出目录]    默认取脚本旁边的 ../public。站点根目录，即放着 index.html 的那个。
+  [仓库名]      默认取源目录名；远端地址取地址末段。带不带 .git 后缀等价。
+
 示例:
   python scripts/prepare-repo.py ../p2ping
-  python scripts/prepare-repo.py ../p2ping public p2ping
+  python scripts/prepare-repo.py https://github.com/LWDJD/p2ping.git
+  python scripts/prepare-repo.py https://github.com/LWDJD/p2ping.git site p2ping
 
 说明:
-  输出目录省略时取脚本旁边的 ../public，跟从哪个目录调用无关。
-
-  输出目录里会多出一个 <仓库名>.git/ 目录以及（必要时）repository.json。
+  产出 <输出目录>/<仓库名>.git/ 和（必要时）repository.json，
   把整个输出目录部署到任意静态托管即可。
+
+  输出目录里如果没有 index.html，说明还缺前端文件，脚本会在结尾提醒。
 
   重复执行是安全的：同名仓库会被覆盖重建，而 repository.json 里该条目的
   description 会保留下来。""")
@@ -259,27 +288,45 @@ def main(argv: list[str]) -> int:
     script_dir = Path(__file__).resolve().parent
     out_arg = argv[1] if len(argv) > 1 else script_dir.parent / "public"
 
-    src = Path(src_arg).expanduser().resolve()
     out_root = Path(out_arg).expanduser().resolve()
+    remote = is_remote(src_arg)
+    src = None
 
-    if not src.exists():
-        raise Failure(f"源仓库不存在: {src}")
+    if remote:
+        name = normalize_name(name_arg) if name_arg else remote_name(src_arg)
+    else:
+        src = Path(src_arg).expanduser().resolve()
+        if not src.exists():
+            raise Failure(f"源仓库不存在: {src}")
+        check_source(src)
+        name = normalize_name(name_arg or src.name)
 
-    name = normalize_name(name_arg or src.name)
     if not is_valid_name(name):
         raise Failure(f"非法仓库名: {name!r}")
 
-    check_source(src)
-
     target = out_root / f"{name}.git"
 
-    print(f"源仓库   {src}")
+    print(f"源仓库   {src_arg}" + ("  (远端)" if remote else ""))
     print(f"目标     {target}")
 
     shutil.rmtree(target, ignore_errors=True)
     out_root.mkdir(parents=True, exist_ok=True)
 
-    build_bare(src, target)
+    if remote:
+        # 直接克隆到目标位置：--bare 会把远端的全部分支都映射成本地分支，
+        # 不只是你本地 checkout 过的那几个。
+        print("> 从远端克隆")
+        try:
+            run_git(["clone", "--bare", "--quiet", src_arg, str(target)])
+        except Failure as exc:
+            shutil.rmtree(target, ignore_errors=True)
+            raise Failure(
+                f"{exc}\n"
+                "  检查地址是否写对、网络是否可达。\n"
+                "  私有仓库需要先让 git 自己拿到凭据（credential helper 或 SSH key）。"
+            )
+    else:
+        build_bare(src, target)
 
     # 对象收进单个 pack，清掉松散对象，再生成服务端索引
     run_git([*NO_AUX_INDEX, "repack", "-a", "-d", "-q"], target)
