@@ -93,10 +93,15 @@ const DefaultPage = `<!doctype html>
       }
 
       try {
-        var blob = await fetch('/api/blob/' + task.id).then(function (r) {
-          return r.arrayBuffer();
+        var res = await fetch('/api/blob/' + task.id);
+        if (!res.ok) throw new Error('取内容失败：' + res.status);
+        var buf = await res.arrayBuffer();
+        // 钱包的 signDataItem 只接受 string 或 Uint8Array。
+        // 直接递 ArrayBuffer 会被它内部的断言挡下（Input is not an ArrayBuffer）。
+        var signed = await wallet().signDataItem({
+          data: new Uint8Array(buf),
+          tags: task.tags,
         });
-        var signed = await wallet().signDataItem({ data: blob, tags: task.tags });
         await fetch('/api/sign/' + task.id, { method: 'POST', body: signed });
       } catch (e) {
         say('签名失败（' + describe(task) + '）：' + (e && e.message ? e.message : String(e)));
