@@ -355,6 +355,11 @@ h3 { font-size: 14px; font-weight: 600; margin: 0 0 8px; }
   overflow: hidden;
 }
 
+/* hidden 属性只是 UA 样式里的 [hidden]{display:none}，优先级最低，
+   会被上面的 display:flex 盖掉——表现得就像菜单永远展开、点也切不动。
+   这里显式让 [hidden] 生效。 */
+.ref-menu[hidden] { display: none; }
+
 /* 分支 / 标签两个平级分页，避免两组混在一列里分不清 */
 .ref-tabs {
   display: flex;
