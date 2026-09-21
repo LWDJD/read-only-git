@@ -66,8 +66,10 @@ func usage(w *os.File) {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "publish 的选项:")
 	fmt.Fprintln(w, "  --arweave          发布到 Arweave，会起本地签名页等钱包签名")
+	fmt.Fprintln(w, "  --l1               走 L1：把内容打成一个 ANS-104 包，签一笔交易直接提交")
+	fmt.Fprintln(w, "  --node <地址>      L1 提交用的节点，默认 arweave.net")
 	fmt.Fprintln(w, "  --repo <名字>      写进 data item 的 Repo 标签")
-	fmt.Fprintln(w, "  --endpoint <地址>  上传服务，默认 turbo.ardrive.io")
+	fmt.Fprintln(w, "  --endpoint <地址>  上传服务，默认 turbo.ardrive.io（非 L1 时使用）")
 	fmt.Fprintln(w, "  --from <入口 id>   从链上取回上次的发布记录，续上增量能力")
 	fmt.Fprintln(w, "  --gateway <地址>   读取用的网关，默认 arweave.net")
 	fmt.Fprintln(w)
@@ -83,6 +85,8 @@ func cmdPublish(args []string) error {
 	endpoint := ""
 	fromEntry := ""
 	gateway := ""
+	useL1 := false
+	node := ""
 	var pos []string
 
 	for i := 0; i < len(args); i++ {
@@ -116,6 +120,14 @@ func cmdPublish(args []string) error {
 			}
 			i++
 			gateway = args[i]
+		case "--l1":
+			useL1 = true
+		case "--node":
+			if i+1 >= len(args) {
+				return fmt.Errorf("--node 后面缺少值")
+			}
+			i++
+			node = args[i]
 		default:
 			if strings.HasPrefix(args[i], "-") {
 				return fmt.Errorf("未知开关: %s", args[i])
@@ -130,7 +142,7 @@ func cmdPublish(args []string) error {
 	}
 
 	if toArweave {
-		return cmdPublishArweave(pos[0], repo, endpoint, fromEntry, gateway)
+		return cmdPublishArweave(pos[0], repo, endpoint, fromEntry, gateway, useL1, node)
 	}
 
 	if len(pos) < 2 {
@@ -194,7 +206,10 @@ func cmdPublishLocal(siteDir, destDir string) error {
 //
 // 签名在浏览器钱包里完成，所以这里要起一个本机服务、等用户在页面里签完。
 // 流程是阻塞的：Target.Publish 内部会等每一次签名回来才继续。
-func cmdPublishArweave(siteDir, repo, endpoint, fromEntry, gateway string) error {
+//
+// 两条路：默认逐个把 data item 交给上传服务；useL1 时攒成一包，
+// 让钱包签一笔以该包为 data 的交易，直接提交到节点，不经过任何打包服务。
+func cmdPublishArweave(siteDir, repo, endpoint, fromEntry, gateway string, useL1 bool, node string) error {
 	site, err := publish.Scan(siteDir)
 	if err != nil {
 		return err
@@ -211,6 +226,10 @@ func cmdPublishArweave(siteDir, repo, endpoint, fromEntry, gateway string) error
 		return err
 	}
 	defer svc.Close()
+
+	if node == "" {
+		node = arweave.DefaultNode
+	}
 
 	uploader := arweave.NewUploader(endpoint)
 	// 记录身份用仓库名而不是上传端点：data item id 是内容寻址的，
@@ -240,17 +259,26 @@ func cmdPublishArweave(siteDir, repo, endpoint, fromEntry, gateway string) error
 
 	target := &arweave.Target{
 		Repo:       repo,
-		Uploader:   uploader,
 		Signer:     svc,
 		RecordPath: publish.RecordRelPath("arweave", repo),
 		Logf: func(format string, a ...any) {
 			fmt.Printf("  "+format+"\n", a...)
 		},
 	}
+	if useL1 {
+		target.TxSigner = svc
+		target.Node = node
+	} else {
+		target.Uploader = uploader
+	}
 
 	fmt.Printf("站点   %s（%d 个文件，%s）\n", site.Root, len(site.Files), humanSize(site.TotalSize()))
 	fmt.Printf("仓库   %s\n", repo)
-	fmt.Printf("上传   %s\n", uploader.Endpoint)
+	if useL1 {
+		fmt.Printf("提交   %s（L1，打成一包直接发交易）\n", node)
+	} else {
+		fmt.Printf("上传   %s\n", uploader.Endpoint)
+	}
 	if prev == nil || len(prev.Refs) == 0 {
 		fmt.Println("> 首次发布")
 	} else {
