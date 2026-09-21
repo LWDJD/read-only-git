@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/LWDJD/read-only-git/internal/publish"
 )
 
 // testToken 是当前测试服务的访问 token。
@@ -357,4 +359,55 @@ func TestRequestsWithoutTokenAreRejected(t *testing.T) {
 	if res.StatusCode != http.StatusForbidden {
 		t.Fatalf("错误 token 应当被拒，实际 %d", res.StatusCode)
 	}
+}
+
+// 发布接口接了进程内互斥：已有同名发布在跑时，后一条应当被拒。
+//
+// 界面上连点两下按钮就会撞到这里，与其让两条发布互踩同一份记录，
+// 不如把后一条拦下来说清原因。
+func TestPublishRejectsWhenAlreadyRunning(t *testing.T) {
+	site := t.TempDir()
+	if err := os.WriteFile(filepath.Join(site, "a.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv := newTestServer(t, site)
+
+	abs, err := filepath.Abs(site)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 先手动占住名额，模拟「已经有一条在跑」
+	release, err := publish.Acquire(abs, "local")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+
+	code, out := postJSON(t, srv.baseURL()+"api/publish", map[string]any{
+		"site": site, "target": "local", "dest": t.TempDir(),
+	})
+	if code != http.StatusOK {
+		t.Fatalf("建任务应当返回 200，实际 %d", code)
+	}
+
+	taskID, _ := out["taskId"].(string)
+	if taskID == "" {
+		t.Fatal("应当返回 taskId")
+	}
+
+	// 任务异步跑，等它报出那句话
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		var snap map[string]any
+		getJSON(t, srv.baseURL()+"api/task/"+taskID, &snap)
+		if snap["status"] == "failed" {
+			msg, _ := snap["error"].(string)
+			if !strings.Contains(msg, "在跑") {
+				t.Fatalf("失败原因应当点明已有发布在跑，实际 %q", msg)
+			}
+			return
+		}
+		time.Sleep(30 * time.Millisecond)
+	}
+	t.Fatal("任务迟迟不结束")
 }

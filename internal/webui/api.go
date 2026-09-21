@@ -283,6 +283,16 @@ func (s *Server) doPublish(t *Task, req publishRequest) error {
 	if len(site.Files) == 0 {
 		return fmt.Errorf("%s 里没有可发布的文件", req.Site)
 	}
+
+	// 同一站点同一目标同时只允许一条发布在跑。
+	// 连点两下按钮就会撞到这里，与其两条发布互踩同一份记录，
+	// 不如直接把后一条拒掉，并告诉她原因。
+	release, err := publish.Acquire(site.Root, req.Target)
+	if err != nil {
+		return err
+	}
+	defer release()
+
 	t.Logf("站点 %s：%d 个文件", site.Root, len(site.Files))
 
 	switch req.Target {
