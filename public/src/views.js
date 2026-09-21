@@ -636,25 +636,51 @@ document.addEventListener('click', closeRefMenus)
  * 免得列表混进一堆提交流。
  */
 function refPicker({ name, ref, heads, tags }) {
-  const items = []
+  // 当前 ref 落在哪个分组就默认展开哪个 tab：
+  // 从标签进来的人不用先手动切一下才能看到自己在哪。
+  const refIsTag = tags.some(tag => tag.name === ref)
+  const groups = [
+    { key: 'heads', label: '分支', items: heads },
+    { key: 'tags', label: '标签', items: tags },
+  ]
+  let active = refIsTag ? 'tags' : 'heads'
 
-  if (heads.length) {
-    items.push(h('div', { class: 'ref-menu-title', text: '分支' }))
-    for (const head of heads) {
-      items.push(refMenuItem(name, head.name, ref))
+  const list = h('div', { class: 'ref-menu-list' })
+
+  const tabButtons = groups.map(group => h('button', {
+    class: 'ref-tab',
+    type: 'button',
+    dataset: { tab: group.key },
+    text: group.label,
+  }))
+
+  function paint() {
+    for (const btn of tabButtons) {
+      btn.classList.toggle('is-active', btn.dataset.tab === active)
     }
-  }
-  if (tags.length) {
-    items.push(h('div', { class: 'ref-menu-title', text: '标签' }))
-    for (const tag of tags) {
-      items.push(refMenuItem(name, tag.name, ref))
+    const group = groups.find(g => g.key === active)
+    if (group.items.length) {
+      mount(list, group.items.map(item => refMenuItem(name, item.name, ref)))
+    } else {
+      mount(list, h('div', { class: 'ref-menu-empty', text: `没有${group.label}` }))
     }
-  }
-  if (!items.length) {
-    items.push(h('div', { class: 'ref-menu-title', text: '没有其他 ref' }))
+    list.scrollTop = 0
   }
 
-  const menu = h('div', { class: 'ref-menu', hidden: true }, items)
+  for (const btn of tabButtons) {
+    btn.addEventListener('click', (event) => {
+      event.stopPropagation()
+      active = btn.dataset.tab
+      paint()
+    })
+  }
+  paint()
+
+  const menu = h('div', { class: 'ref-menu', hidden: true },
+    h('div', { class: 'ref-tabs' }, tabButtons),
+    list,
+  )
+
   const btn = h('button', {
     class: 'branch-chip ref-button',
     type: 'button',

@@ -344,19 +344,67 @@ h3 { font-size: 14px; font-weight: 600; margin: 0 0 8px; }
   top: calc(100% + 4px);
   left: 0;
   z-index: 40;
-  min-width: 200px;
+  min-width: 220px;
   max-height: 320px;
-  overflow-y: auto;
-  padding: 6px 0;
+  display: flex;
+  flex-direction: column;
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   box-shadow: 0 8px 24px rgba(0, 0, 0, .14);
+  overflow: hidden;
 }
 
-.ref-menu-title {
-  padding: 6px 12px 3px;
-  font-size: 11px;
+/* 分支 / 标签两个平级分页，避免两组混在一列里分不清 */
+.ref-tabs {
+  display: flex;
+  flex: none;
+  padding: 4px 4px 0;
+  background: var(--bg-subtle);
+  border-bottom: 1px solid var(--border);
+}
+
+.ref-tab {
+  flex: 1;
+  font: inherit;
+  font-size: 12px;
+  padding: 6px 8px;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.ref-tab:hover { color: var(--text); }
+
+.ref-tab.is-active {
+  color: var(--text);
+  font-weight: 600;
+  border-bottom-color: var(--accent-mark);
+}
+
+.ref-menu-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 6px 0;
+  /* Firefox */
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+
+/* 默认滚动条带一层白底，在菜单里很抢眼；把轨道改成透明 */
+.ref-menu-list::-webkit-scrollbar { width: 8px; }
+.ref-menu-list::-webkit-scrollbar-track { background: transparent; }
+.ref-menu-list::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 4px;
+}
+.ref-menu-list::-webkit-scrollbar-thumb:hover { background: var(--border-strong); }
+
+.ref-menu-empty {
+  padding: 10px 12px;
+  font-size: 12px;
   color: var(--text-muted);
 }
 
