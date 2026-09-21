@@ -68,9 +68,12 @@ func usage(w *os.File) {
 	fmt.Fprintln(w, "  --arweave          发布到 Arweave，会起本地签名页等钱包签名")
 	fmt.Fprintln(w, "  --repo <名字>      写进 data item 的 Repo 标签")
 	fmt.Fprintln(w, "  --endpoint <地址>  上传服务，默认 turbo.ardrive.io")
+	fmt.Fprintln(w, "  --from <入口 id>   从链上取回上次的发布记录，续上增量能力")
+	fmt.Fprintln(w, "  --gateway <地址>   读取用的网关，默认 arweave.net")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "publish 会复用上一次的发布记录（存在 <站点目录>/.rog/ 下），")
-	fmt.Fprintln(w, "只处理内容变化的文件。")
+	fmt.Fprintln(w, "只处理内容变化的文件。记录本身也会随站点上链，")
+	fmt.Fprintln(w, "换机器时用 --from 就能取回来。")
 }
 
 func cmdPublish(args []string) error {
@@ -78,6 +81,8 @@ func cmdPublish(args []string) error {
 	toArweave := false
 	repo := ""
 	endpoint := ""
+	fromEntry := ""
+	gateway := ""
 	var pos []string
 
 	for i := 0; i < len(args); i++ {
@@ -99,6 +104,18 @@ func cmdPublish(args []string) error {
 			}
 			i++
 			endpoint = args[i]
+		case "--from":
+			if i+1 >= len(args) {
+				return fmt.Errorf("--from 后面缺少值")
+			}
+			i++
+			fromEntry = args[i]
+		case "--gateway":
+			if i+1 >= len(args) {
+				return fmt.Errorf("--gateway 后面缺少值")
+			}
+			i++
+			gateway = args[i]
 		default:
 			if strings.HasPrefix(args[i], "-") {
 				return fmt.Errorf("未知开关: %s", args[i])
@@ -113,7 +130,7 @@ func cmdPublish(args []string) error {
 	}
 
 	if toArweave {
-		return cmdPublishArweave(pos[0], repo, endpoint)
+		return cmdPublishArweave(pos[0], repo, endpoint, fromEntry, gateway)
 	}
 
 	if len(pos) < 2 {
@@ -177,7 +194,7 @@ func cmdPublishLocal(siteDir, destDir string) error {
 //
 // 签名在浏览器钱包里完成，所以这里要起一个本机服务、等用户在页面里签完。
 // 流程是阻塞的：Target.Publish 内部会等每一次签名回来才继续。
-func cmdPublishArweave(siteDir, repo, endpoint string) error {
+func cmdPublishArweave(siteDir, repo, endpoint, fromEntry, gateway string) error {
 	site, err := publish.Scan(siteDir)
 	if err != nil {
 		return err
@@ -199,16 +216,33 @@ func cmdPublishArweave(siteDir, repo, endpoint string) error {
 	// 记录身份用仓库名而不是上传端点：data item id 是内容寻址的，
 	// 换一个端点，同一份内容仍然是同一个 id，用端点分键只会白白重传一遍。
 	statePath := publish.StatePath(site.Root, "arweave", repo)
+
 	prev, err := publish.LoadRecord(statePath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "! %v（按首次发布处理）\n", err)
 		prev = nil
 	}
 
+	// --from：把链上那份发布记录取回来，续上增量能力。
+	// 换机器、本地 .rog 丢了之后走这条路，不必从零重传。
+	if fromEntry != "" {
+		fetched, ferr := arweave.FetchRecord(context.Background(), gateway, fromEntry,
+			publish.RecordRelPath("arweave", repo))
+		if ferr != nil {
+			return ferr
+		}
+		if err := publish.SaveRecord(statePath, fetched); err != nil {
+			return err
+		}
+		fmt.Printf("v 已从链上取回发布记录，含 %d 个文件引用\n", len(fetched.Refs))
+		prev = fetched
+	}
+
 	target := &arweave.Target{
-		Repo:     repo,
-		Uploader: uploader,
-		Signer:   svc,
+		Repo:       repo,
+		Uploader:   uploader,
+		Signer:     svc,
+		RecordPath: publish.RecordRelPath("arweave", repo),
 		Logf: func(format string, a ...any) {
 			fmt.Printf("  "+format+"\n", a...)
 		},

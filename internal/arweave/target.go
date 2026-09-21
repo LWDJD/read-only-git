@@ -23,7 +23,10 @@ type Target struct {
 	Repo     string // 仓库名，写进 tags
 	Uploader *Uploader
 	Signer   Signer
-	Logf     func(format string, args ...any)
+	// RecordPath 是发布记录在站点内的相对路径（用 / 分隔）。非空时会把记录
+	// 也传上链并写进 manifest，换机器后能靠入口取回来。
+	RecordPath string
+	Logf       func(format string, args ...any)
 }
 
 func (t *Target) Name() string { return "arweave" }
@@ -90,9 +93,37 @@ func (t *Target) Publish(ctx context.Context, site *publish.Site, prev *publish.
 		uploaded++
 	}
 
+	// 把发布记录本身也挂上链：换机器或本地文件丢了之后，靠入口就能取回
+	// 「路径 -> data item id」的映射，增量发布不必从零重传。
+	//
+	// 链上这份的 Root 只能是空的。入口 id 要等 manifest 传完才知道，
+	// 而 manifest 又得把记录文件包含进去，这里存在先后依赖。
+	// 不影响增量：复用只认 Files / Refs / Labels 三个映射。
+	paths := make(map[string]string, len(rec.Refs)+1)
+	for p, id := range rec.Refs {
+		paths[p] = id
+	}
+	if t.RecordPath != "" {
+		chainRec := *rec
+		chainRec.Root = ""
+		data, err := publish.MarshalRecord(&chainRec)
+		if err != nil {
+			return rec, err
+		}
+		signedRecord, err := t.Signer.Sign(ctx, data, RecordTags(t.Repo))
+		if err != nil {
+			return rec, fmt.Errorf("签名发布记录失败: %w", err)
+		}
+		recordID, err := t.Uploader.Upload(ctx, signedRecord)
+		if err != nil {
+			return rec, fmt.Errorf("上传发布记录失败: %w", err)
+		}
+		paths[t.RecordPath] = recordID
+	}
+
 	// 入口：把「路径 -> data item id」固化成 manifest 再上链。
 	// 旧版本 manifest 依然可达，只是入口指向了新的这一个。
-	manifestBytes, err := NewManifest(rec.Refs, EntryPath(site)).Bytes()
+	manifestBytes, err := NewManifest(paths, EntryPath(site)).Bytes()
 	if err != nil {
 		return rec, err
 	}

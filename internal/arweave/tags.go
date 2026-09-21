@@ -24,6 +24,9 @@ const (
 	// ManifestContentType 是 Arweave path manifest 的专用 Content-Type，
 	// 网关靠它识别 manifest。
 	ManifestContentType = "application/x.arweave-manifest+json"
+
+	// TagRecord 标记「这是一份发布记录」，便于按 tag 检索与辨认。
+	TagRecord = "Rog-Record"
 )
 
 // ContentTags 为站点里的一个文件生成 tags。
@@ -46,6 +49,19 @@ func ManifestTags(repo string) []Tag {
 	tags := []Tag{
 		{Name: TagAppName, Value: AppName},
 		{Name: TagContentType, Value: ManifestContentType},
+	}
+	if repo != "" {
+		tags = append(tags, Tag{Name: TagRepo, Value: repo})
+	}
+	return tags
+}
+
+// RecordTags 为发布记录生成 tags。
+func RecordTags(repo string) []Tag {
+	tags := []Tag{
+		{Name: TagAppName, Value: AppName},
+		{Name: TagContentType, Value: "application/json"},
+		{Name: TagRecord, Value: "1"},
 	}
 	if repo != "" {
 		tags = append(tags, Tag{Name: TagRepo, Value: repo})

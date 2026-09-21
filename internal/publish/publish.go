@@ -14,6 +14,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -160,21 +161,39 @@ func Changed(site *Site, prev *Record) []string {
 	return out
 }
 
-// StatePath 返回某个发布目标的记录文件路径，identity 是该目标的身份标识。
-//
-// 名字里带上身份标识的短哈希：同一个站点发到两个不同目的地（两个本地目录、
-// 两个仓库名）时，若共用一个记录文件，会互相覆盖 root、复用判断也会串味。
+// recordFileName 是发布记录的文件名。名字里带上身份标识的短哈希：
+// 同一个站点发到两个不同目的地（两个本地目录、两个仓库名）时，若共用一个
+// 记录文件，会互相覆盖 root、复用判断也会串味。
 //
 // 选什么当 identity 很关键：它应当是「决定复用能否成立」的东西。
 // 例如 Arweave 用仓库名而不是上传端点——data item id 是内容寻址的，
 // 换个端点同一份内容依然是同一个 id，拿端点分键只会白白重传一遍。
-func StatePath(siteRoot, target, identity string) string {
+func recordFileName(target, identity string) string {
 	if identity == "" {
 		identity = "default"
 	}
 	sum := sha256.Sum256([]byte(identity))
-	suffix := hex.EncodeToString(sum[:4])
-	return filepath.Join(siteRoot, StateDir, fmt.Sprintf("publish-%s-%s.json", target, suffix))
+	return fmt.Sprintf("publish-%s-%s.json", target, hex.EncodeToString(sum[:4]))
+}
+
+// StatePath 返回记录在本地磁盘上的路径。
+func StatePath(siteRoot, target, identity string) string {
+	return filepath.Join(siteRoot, StateDir, recordFileName(target, identity))
+}
+
+// RecordRelPath 返回记录在站点内的相对路径（用 / 分隔）。
+//
+// 记录会作为站点内容一并发布，所以这个路径要能被 manifest 直接引用，
+// 换机器时照着它从网关取回来即可。
+func RecordRelPath(target, identity string) string {
+	return path.Join(StateDir, recordFileName(target, identity))
+}
+
+// MarshalRecord 序列化发布记录。
+//
+// 上链那一份与本地那一份共用这套字节，避免两边格式漂移。
+func MarshalRecord(rec *Record) ([]byte, error) {
+	return json.MarshalIndent(rec, "", "  ")
 }
 
 // LoadRecord 读取发布记录；文件不存在时返回 (nil, nil)。
@@ -211,7 +230,7 @@ func SaveRecord(path string, rec *Record) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	data, err := json.MarshalIndent(rec, "", "  ")
+	data, err := MarshalRecord(rec)
 	if err != nil {
 		return err
 	}
