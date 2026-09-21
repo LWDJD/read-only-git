@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -94,6 +93,25 @@ func SubmitTx(ctx context.Context, node string, bundle []byte, tags []Tag, sig *
 
 	// 字段名对齐 arweave-js 的 Transaction.toJSON()，节点就是照它解的。
 	// data_size 是字符串不是数字，这点容易写错。
+	body, err := txPayload(bundle, tags, sig)
+	if err != nil {
+		return "", err
+	}
+
+	if _, err := postJSON(ctx, node, "/tx", body, client); err != nil {
+		return "", err
+	}
+	return sig.ID, nil
+}
+
+// txPayload 拼出交易 JSON 的字节。
+//
+// data 传 nil 时 data 字段为空串，用于分块提交的第一步：
+// 先把交易报上去，内容再逐块补。
+func txPayload(data []byte, tags []Tag, sig *TxSignature) ([]byte, error) {
+	// data_size 以页面回传的为准，缺失时用实际长度兜底。
+	dataSize := DataSizeOf(sig, data)
+
 	tx := struct {
 		Format    int    `json:"format"`
 		ID        string `json:"id"`
@@ -115,41 +133,60 @@ func SubmitTx(ctx context.Context, node string, bundle []byte, tags []Tag, sig *
 		Tags:      tags,
 		Target:    "",
 		Quantity:  "0",
-		Data:      base64.RawURLEncoding.EncodeToString(bundle),
+		Data:      base64.RawURLEncoding.EncodeToString(data),
 		DataRoot:  sig.DataRoot,
-		DataSize:  strconv.Itoa(len(bundle)),
+		DataSize:  dataSize,
 		Reward:    sig.Reward,
 		Signature: sig.Signature,
 	}
+	return json.Marshal(tx)
+}
 
-	body, err := json.Marshal(tx)
-	if err != nil {
-		return "", err
-	}
+// nodeError 是节点返回的非 2xx 响应。
+//
+// 单独建一个类型是为了让重试逻辑能按状态码判断，
+// 而不是去字符串里找线索。
+type nodeError struct {
+	Status     int
+	StatusText string
+	Body       string
+}
 
+func (e *nodeError) Error() string {
+	return fmt.Sprintf("节点返回 %s: %s", e.StatusText, truncate(e.Body, 300))
+}
+
+// postJSON 往节点发一个 JSON 请求。
+//
+// 非 2xx 时同样返回响应体，调用方可以用它判断是否值得重试。
+func postJSON(ctx context.Context, node, path string, body []byte, client *http.Client) ([]byte, error) {
 	if client == nil {
 		client = &http.Client{Timeout: 10 * time.Minute}
 	}
-	url := strings.TrimRight(node, "/") + "/tx"
+	url := strings.TrimRight(node, "/") + path
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	defer resp.Body.Close()
 
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	if resp.StatusCode/100 != 2 {
-		return "", fmt.Errorf("提交交易失败 %s: %s", resp.Status, truncate(string(respBody), 300))
+		return respBody, &nodeError{
+			Status:     resp.StatusCode,
+			StatusText: resp.Status,
+			Body:       string(respBody),
+		}
 	}
-	return sig.ID, nil
+	return respBody, nil
 }
