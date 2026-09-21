@@ -1,0 +1,100 @@
+{
+ "generatedBy": "arweave-js 1.15.1",
+ "fill": "data[i] = i & 0xff",
+ "note": "offset 是每块末字节在整份数据里的索引。",
+ "cases": [
+  {
+   "size": 1,
+   "offsets": [
+    0
+   ],
+   "dataRoot": "Ht_yZhXGBDUZfLv4OD6we7FkrjcpDpGPwQZEZgEJVfk",
+   "chunkHashes": [
+    "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d"
+   ],
+   "proofLengths": [
+    64
+   ]
+  },
+  {
+   "size": 32768,
+   "offsets": [
+    32767
+   ],
+   "dataRoot": "zAHG32yuvn5HQHkSuxkbdQTAbX53smIZ8L_FSttAZoI",
+   "chunkHashes": [
+    "e11360251d1173650cdcd20f111d8f1ca2e412f572e8b36a4dc067121c1799b8"
+   ],
+   "proofLengths": [
+    64
+   ]
+  },
+  {
+   "size": 262144,
+   "offsets": [
+    262143
+   ],
+   "dataRoot": "FKdG8MhzIRfNMTlB7eUmlKu9NwpBOrEdUjyTaSQrV8Q",
+   "chunkHashes": [
+    "2312394bd99545d9de131c24efb781e765ac1aec243f2ed9347597a793a415e9"
+   ],
+   "proofLengths": [
+    160
+   ]
+  },
+  {
+   "size": 262145,
+   "offsets": [
+    131072,
+    262144
+   ],
+   "dataRoot": "rRUkQivFouwhOka6C-GA6u5haWGLsX3yVwnEP7fHLDk",
+   "chunkHashes": [
+    "59143c73fbc669c18bdeb36c7cfa13888c03a2d935b18d939c628692360c16ff",
+    "3236dbd4b01931b8915bc8b5b3733a25637db827f976b074eb3ef66d461e4fe8"
+   ],
+   "proofLengths": [
+    160,
+    160
+   ]
+  },
+  {
+   "size": 300000,
+   "offsets": [
+    262143,
+    299999
+   ],
+   "dataRoot": "CfZ18ove-M6C1v2B_7d0uxvtEgA5i1oJZpweULHjvmM",
+   "chunkHashes": [
+    "2312394bd99545d9de131c24efb781e765ac1aec243f2ed9347597a793a415e9",
+    "0de34f4029de7db4f571ed9b4334801b3337d37872a85573d14167db5dcb5e71"
+   ],
+   "proofLengths": [
+    160,
+    160
+   ]
+  },
+  {
+   "size": 1048576,
+   "offsets": [
+    262143,
+    524287,
+    786431,
+    1048575
+   ],
+   "dataRoot": "8fn-BCWrSerC_LlNXLl2fJOSLYoiYy8vW5yNfzfEoZ0",
+   "chunkHashes": [
+    "2312394bd99545d9de131c24efb781e765ac1aec243f2ed9347597a793a415e9",
+    "2312394bd99545d9de131c24efb781e765ac1aec243f2ed9347597a793a415e9",
+    "2312394bd99545d9de131c24efb781e765ac1aec243f2ed9347597a793a415e9",
+    "2312394bd99545d9de131c24efb781e765ac1aec243f2ed9347597a793a415e9"
+   ],
+   "proofLengths": [
+    352,
+    352,
+    352,
+    352
+   ]
+  }
+ ]
+}
