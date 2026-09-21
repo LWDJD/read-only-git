@@ -265,7 +265,7 @@ export async function viewTree(app, ctx, route) {
   const ref = route.ref
   const path = route.path
 
-  const crumbs = [{ text: repoLabel(name), href: repoHref(name) }]
+  const crumbs = [{ text: repoLabel(name), href: treeHref(name, ref, '') }]
   if (path) crumbs.push({ text: path, href: treeHref(name, ref, path) })
 
   await repoPage(app, ctx, {
@@ -294,7 +294,7 @@ export async function viewBlob(app, ctx, route) {
   await repoPage(app, ctx, {
     name, active: 'code', ref,
     crumbs: [
-      { text: repoLabel(name), href: repoHref(name) },
+      { text: repoLabel(name), href: treeHref(name, ref, '') },
       { text: path, href: blobHref(name, ref, path) },
     ],
     build: async (chrome) => {
@@ -339,7 +339,7 @@ export async function viewCommits(app, ctx, route) {
   await repoPage(app, ctx, {
     name, active: 'commits', ref,
     crumbs: [
-      { text: repoLabel(name), href: repoHref(name) },
+      { text: repoLabel(name), href: treeHref(name, ref, '') },
       { text: '提交' },
     ],
     build: async (chrome) => {
@@ -385,7 +385,7 @@ export async function viewBranches(app, ctx, route) {
   await repoPage(app, ctx, {
     name, active: 'branches',
     crumbs: [
-      { text: repoLabel(name), href: repoHref(name) },
+      { text: repoLabel(name), href: treeHref(name, '', '') },
       { text: '分支' },
     ],
     build: async (chrome) => {
@@ -440,7 +440,7 @@ export async function viewTags(app, ctx, route) {
   await repoPage(app, ctx, {
     name, active: 'tags',
     crumbs: [
-      { text: repoLabel(name), href: repoHref(name) },
+      { text: repoLabel(name), href: treeHref(name, '', '') },
       { text: '标签' },
     ],
     build: async (chrome) => {
@@ -613,7 +613,9 @@ function docsPanel(repo, sha, docs) {
 
 function breadcrumbHeader(name, ref, path) {
   const parts = String(path || '').split('/').filter(Boolean)
-  const nodes = [link(repoHref(name), repoLabel(name))]
+  // 仓库名指向「当前 ref 的代码根」而不是概览页：
+  // 在看某个提交的快照时点它，应当留在那个提交里，而不是被拉回默认分支。
+  const nodes = [link(treeHref(name, ref, ''), repoLabel(name))]
 
   let acc = ''
   for (const part of parts) {
