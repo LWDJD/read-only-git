@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -14,12 +16,40 @@ import (
 
 func newTestServer(t *testing.T, site string) *Server {
 	t.Helper()
-	srv := New(site)
+	// 端口传 0：测试之间互不干扰，由系统挑空闲的
+	srv := New(site, 0)
 	if err := srv.Start(); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = srv.Close() })
 	return srv
+}
+
+// 指定端口时应当固定监听它，方便反复访问同一个地址。
+func TestServerHonorsFixedPort(t *testing.T) {
+	site := t.TempDir()
+	if err := os.WriteFile(filepath.Join(site, "index.html"), []byte("hi"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// 先占一个端口拿到号再放掉：这样既知道一个可用端口，
+	// 又不至于与别的进程撞车。
+	probe, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := probe.Addr().(*net.TCPAddr).Port
+	_ = probe.Close()
+
+	srv := New(site, port)
+	if err := srv.Start(); err != nil {
+		t.Fatalf("固定端口启动失败: %v", err)
+	}
+	defer srv.Close()
+
+	if !strings.HasSuffix(srv.URL(), ":"+strconv.Itoa(port)+"/") {
+		t.Fatalf("URL 应当用指定端口，实际 %s", srv.URL())
+	}
 }
 
 func getJSON(t *testing.T, url string, into any) {

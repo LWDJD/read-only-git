@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -60,7 +61,7 @@ func usage(w *os.File) {
 	fmt.Fprintln(w, "  pack [--update] <源仓库> [输出目录] [仓库名]   生成可托管的裸仓库")
 	fmt.Fprintln(w, "  publish <站点目录> [目标目录]                 发布到本地目录")
 	fmt.Fprintln(w, "  publish <站点目录> --arweave [选项]            发布到 Arweave（钱包签名）")
-	fmt.Fprintln(w, "  webui [--site <站点目录>]                    打开图形界面，功能与命令行一致")
+	fmt.Fprintln(w, "  webui [--site <站点目录>] [--port <端口>]      打开图形界面，功能与命令行一致")
 	fmt.Fprintln(w, "  help                                         显示本说明")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "pack 的参数:")
@@ -81,6 +82,10 @@ func usage(w *os.File) {
 	fmt.Fprintln(w, "publish 会复用上一次的发布记录（存在 <站点目录>/.rog/ 下），")
 	fmt.Fprintln(w, "只处理内容变化的文件。记录本身也会随站点上链，")
 	fmt.Fprintln(w, "换机器时用 --from 就能取回来。")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "webui 的选项:")
+	fmt.Fprintln(w, "  --site <目录>   默认操作的站点目录，默认 ./public")
+	fmt.Fprintln(w, "  --port <端口>   固定监听端口，默认由系统分配一个空闲的")
 }
 
 func cmdPublish(args []string) error {
@@ -330,6 +335,7 @@ func cmdPublishArweave(siteDir, repo, endpoint, fromEntry, gateway string, useL1
 // 只绑 127.0.0.1，不对外开放。
 func cmdWebui(args []string) error {
 	siteDir := "public"
+	port := 0
 
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
@@ -342,6 +348,16 @@ func cmdWebui(args []string) error {
 			}
 			i++
 			siteDir = args[i]
+		case "--port":
+			if i+1 >= len(args) {
+				return fmt.Errorf("--port 后面缺少值")
+			}
+			i++
+			n, err := strconv.Atoi(args[i])
+			if err != nil || n < 0 || n > 65535 {
+				return fmt.Errorf("--port 需要 0 到 65535 之间的数字，实际 %q", args[i])
+			}
+			port = n
 		default:
 			if strings.HasPrefix(args[i], "-") {
 				return fmt.Errorf("未知开关: %s", args[i])
@@ -350,7 +366,7 @@ func cmdWebui(args []string) error {
 		}
 	}
 
-	srv := webui.New(siteDir)
+	srv := webui.New(siteDir, port)
 	if err := srv.Start(); err != nil {
 		return err
 	}

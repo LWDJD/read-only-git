@@ -20,25 +20,34 @@ import (
 // Server 是本机 webui 服务。
 type Server struct {
 	siteDir string
+	port    int
 	tasks   *Store
 
 	listener net.Listener
 	server   *http.Server
 }
 
-// New 创建一个 webui 服务；siteDir 是默认操作的站点目录。
-func New(siteDir string) *Server {
+// New 创建一个 webui 服务。
+//
+// siteDir 是默认操作的站点目录；port 为 0 时由系统挑一个空闲端口，
+// 传具体值时固定监听该端口，方便反复访问同一个地址。
+func New(siteDir string, port int) *Server {
 	return &Server{
 		siteDir: siteDir,
+		port:    port,
 		tasks:   NewStore(),
 	}
 }
 
-// Start 在 127.0.0.1 的随机端口上开始监听。
+// Start 在 127.0.0.1 上开始监听。
 //
 // 只绑回环地址：这个服务能改站点文件、能发起发布，不能让同网段的其他人碰到。
 func (s *Server) Start() error {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	addr := "127.0.0.1:0"
+	if s.port > 0 {
+		addr = fmt.Sprintf("127.0.0.1:%d", s.port)
+	}
+	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return err
 	}
