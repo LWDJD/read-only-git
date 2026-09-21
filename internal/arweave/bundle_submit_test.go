@@ -6,11 +6,45 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 )
+
+// chunkingTxSigner 模拟「页面已经算好分块证明」的情形。
+//
+// 它按单块上限切出 offsets，证明内容本身是占位：
+// 这一层测的是 Go 拿到 proofs 后怎么切、怎么发，不是 Merkle 算得对不对。
+type chunkingTxSigner struct {
+	mu      sync.Mutex
+	bundles [][]byte
+}
+
+func (s *chunkingTxSigner) SignTx(ctx context.Context, data []byte, tags []Tag) (*TxSignature, error) {
+	s.mu.Lock()
+	s.bundles = append(s.bundles, append([]byte(nil), data...))
+	s.mu.Unlock()
+
+	var proofs []ChunkProof
+	for end := MaxChunkSize; end < len(data); end += MaxChunkSize {
+		proofs = append(proofs, ChunkProof{DataPath: "p", Offset: strconv.Itoa(end - 1)})
+	}
+	proofs = append(proofs, ChunkProof{DataPath: "p", Offset: strconv.Itoa(len(data) - 1)})
+
+	return &TxSignature{
+		ID: "tx-big", Owner: "o", Signature: "s",
+		DataRoot: "root-big", DataSize: strconv.Itoa(len(data)),
+		Proofs: proofs,
+	}, nil
+}
+
+func (s *chunkingTxSigner) bundleCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.bundles)
+}
 
 // chunkNode 假扮 Arweave 节点，把收到的请求记下来供断言。
 //

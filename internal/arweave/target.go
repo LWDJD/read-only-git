@@ -169,17 +169,17 @@ func (t *Target) Publish(ctx context.Context, site *publish.Site, prev *publish.
 	// L1：把这一轮新签的 data item 打成一包，签一笔交易发出去。
 	// 未变的文件没有进 pending，它们的 data item 还在上一笔交易里，
 	// manifest 里引用的就是那些旧 id，所以不必重复付费。
+	//
+	// 体积不再卡在 256 KiB：超过一块时 SubmitBundle 会自动走分块协议，
+	// 先报交易再逐块补。
 	if l1 {
 		bundle := Bundle(pending)
 		tags := BundleTags(t.Repo)
-		if err := CheckBundleSize(len(bundle)); err != nil {
-			return rec, err
-		}
 		sig, err := t.TxSigner.SignTx(ctx, bundle, tags)
 		if err != nil {
 			return rec, fmt.Errorf("签名交易失败: %w", err)
 		}
-		txID, err := SubmitTx(ctx, t.Node, bundle, tags, sig, nil)
+		txID, err := SubmitBundle(ctx, t.Node, bundle, tags, sig, nil, t.logf)
 		if err != nil {
 			return rec, err
 		}

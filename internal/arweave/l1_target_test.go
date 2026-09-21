@@ -272,9 +272,11 @@ func TestDataItemIDRejectsShortInput(t *testing.T) {
 	}
 }
 
-// L1 模式下超过一次性提交上限要提前拦下，不能把签好的东西丢在路上。
-func TestL1PublishRejectsOversizeBundle(t *testing.T) {
-	// 一个稍大的文件就足以把 bundle 推过上限
+// L1 模式下超过单块上限、却没有分块证明时要报错，不能硬发。
+//
+// 这个桩签名器只回签名字段、不带 proof，正是「页面版本旧了」的形状。
+func TestL1PublishRejectsOversizeWithoutProofs(t *testing.T) {
+	// 一个稍大的文件就足以把 bundle 推过单块上限
 	big := strings.Repeat("x", BundleLimit+1024)
 	site := writeSite(t, map[string]string{"big.txt": big})
 
@@ -284,10 +286,57 @@ func TestL1PublishRejectsOversizeBundle(t *testing.T) {
 		Repo: "demo", Signer: &richStubSigner{}, TxSigner: txSigner, Node: nodeURL,
 	}
 
-	if _, err := target.Publish(context.Background(), site, nil); err == nil {
-		t.Fatal("超大 bundle 应当报错")
+	_, err := target.Publish(context.Background(), site, nil)
+	if err == nil {
+		t.Fatal("超过单块上限却没有分块证明，应当报错而不是硬发")
 	}
-	if txSigner.bundleCount() != 0 {
-		t.Fatal("超限时不该发起任何交易签名")
+	if !strings.Contains(err.Error(), "分块") {
+		t.Fatalf("错误信息应点明分块: %v", err)
+	}
+}
+
+// 有分块证明时，超过一块的 bundle 应当走分块提交：
+// 交易先报（不带 data），内容再逐块补。
+func TestL1PublishChunksLargeBundle(t *testing.T) {
+	big := strings.Repeat("A", 200*1024)
+	site := writeSite(t, map[string]string{
+		"index.html": "<h1>hi</h1>",
+		"a.bin":      big,
+		"b.bin":      big,
+	})
+
+	node := &chunkNode{}
+	srv := httptest.NewServer(node.handler())
+	defer srv.Close()
+
+	target := &Target{
+		Repo:     "demo",
+		Signer:   &richStubSigner{},
+		TxSigner: &chunkingTxSigner{},
+		Node:     srv.URL,
+	}
+
+	rec, err := target.Publish(context.Background(), site, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Root == "" {
+		t.Fatal("应当有入口")
+	}
+
+	txs, chunks := node.snapshot()
+	if len(txs) != 1 {
+		t.Fatalf("应当只报 1 笔交易，实际 %d", len(txs))
+	}
+	if txs[0]["data"] != "" {
+		t.Fatal("分块时交易不该带 data")
+	}
+	if len(chunks) < 2 {
+		t.Fatalf("这么大的 bundle 应当分多块提交，实际 %d 块", len(chunks))
+	}
+	for i, c := range chunks {
+		if c["data_root"] == "" {
+			t.Fatalf("第 %d 块缺 data_root", i)
+		}
 	}
 }
