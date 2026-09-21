@@ -10,9 +10,12 @@ package webui
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -21,6 +24,7 @@ import (
 type Server struct {
 	siteDir string
 	port    int
+	token   string
 	tasks   *Store
 
 	listener net.Listener
@@ -35,8 +39,21 @@ func New(siteDir string, port int) *Server {
 	return &Server{
 		siteDir: siteDir,
 		port:    port,
+		token:   newToken(),
 		tasks:   NewStore(),
 	}
+}
+
+// newToken 生成一个随机的会话 token。
+//
+// 每次启动都不一样，不落盘、不进配置，进程退出即失效。
+func newToken() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// 随机源不可用时也不能悄悄放行，用时间戳兜底总比空 token 强
+		return strconv.FormatInt(time.Now().UnixNano(), 16)
+	}
+	return hex.EncodeToString(b[:])
 }
 
 // Start 在 127.0.0.1 上开始监听。
@@ -54,14 +71,14 @@ func (s *Server) Start() error {
 	s.listener = ln
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/", s.handlePage)
-	mux.HandleFunc("/api/state", s.handleState)
-	mux.HandleFunc("/api/pack", s.handlePack)
-	mux.HandleFunc("/api/publish", s.handlePublish)
-	mux.HandleFunc("/api/restore", s.handleRestore)
-	mux.HandleFunc("/api/files/replace", s.handleFileReplace)
-	mux.HandleFunc("/api/files/delete", s.handleFileDelete)
-	mux.HandleFunc("/api/task/", s.handleTask)
+	mux.HandleFunc("/", s.guard(s.handlePage))
+	mux.HandleFunc("/api/state", s.guard(s.handleState))
+	mux.HandleFunc("/api/pack", s.guard(s.handlePack))
+	mux.HandleFunc("/api/publish", s.guard(s.handlePublish))
+	mux.HandleFunc("/api/restore", s.guard(s.handleRestore))
+	mux.HandleFunc("/api/files/replace", s.guard(s.handleFileReplace))
+	mux.HandleFunc("/api/files/delete", s.guard(s.handleFileDelete))
+	mux.HandleFunc("/api/task/", s.guard(s.handleTask))
 
 	s.server = &http.Server{
 		Handler:           mux,
@@ -71,12 +88,50 @@ func (s *Server) Start() error {
 	return nil
 }
 
-// URL 返回界面地址。
+// URL 返回界面地址，带上访问 token。
 func (s *Server) URL() string {
 	if s.listener == nil {
 		return ""
 	}
+	return s.baseURL() + "?token=" + s.token
+}
+
+// baseURL 返回不含 token 的根地址（带尾斜杠），供内部与测试拼接路径。
+func (s *Server) baseURL() string {
+	if s.listener == nil {
+		return ""
+	}
 	return "http://" + s.listener.Addr().String() + "/"
+}
+
+// Token 返回本次会话的访问 token。
+func (s *Server) Token() string { return s.token }
+
+// guard 给每个处理器套上 token 校验。
+//
+// 服务只绑 127.0.0.1，但同机的任意网页都能向它发请求：
+// 一个恶意页面就能让浏览器替它去改站点文件、发起发布。
+// 所以所有请求都得带上启动时生成的那个 token。
+func (s *Server) guard(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !s.tokenOK(r) {
+			writeErr(w, http.StatusForbidden,
+				fmt.Errorf("缺少或错误的 token，请用启动时打印的地址访问"))
+			return
+		}
+		next(w, r)
+	}
+}
+
+// tokenOK 接受两种带法。
+//
+// header 用于普通请求；query 是给 EventSource 留的，
+// 那个 API 不允许自定义请求头。
+func (s *Server) tokenOK(r *http.Request) bool {
+	if r.Header.Get("X-Rog-Token") == s.token {
+		return true
+	}
+	return r.URL.Query().Get("token") == s.token
 }
 
 // SiteDir 返回默认站点目录。

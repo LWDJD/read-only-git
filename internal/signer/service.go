@@ -15,6 +15,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -42,6 +43,7 @@ type Service struct {
 	items    map[string]*item
 	order    []string
 	page     []byte
+	token    string
 	listener net.Listener
 	server   *http.Server
 }
@@ -60,7 +62,20 @@ func New(page []byte) *Service {
 	return &Service{
 		items: make(map[string]*item),
 		page:  page,
+		token: newToken(),
 	}
+}
+
+// newToken 生成一个随机的会话 token，方式与 webui 那边一致。
+//
+// 两处各自实现一份而不共用一个内部包：它只有十行，
+// 为此把两个不相干的包绁在一起不划算。
+func newToken() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return strconv.FormatInt(time.Now().UnixNano(), 16)
+	}
+	return hex.EncodeToString(b[:])
 }
 
 // Start 在 127.0.0.1 的随机端口上开始监听。
@@ -75,12 +90,15 @@ func (s *Service) Start() error {
 	s.listener = ln
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/", s.handlePage)
-	mux.HandleFunc("/api/next", s.handleNext)
-	mux.HandleFunc("/api/blob/", s.handleBlob)
-	mux.HandleFunc("/api/sign/", s.handleSign)
+	mux.HandleFunc("/", s.guard(s.handlePage))
+	mux.HandleFunc("/api/next", s.guard(s.handleNext))
+	mux.HandleFunc("/api/blob/", s.guard(s.handleBlob))
+	mux.HandleFunc("/api/sign/", s.guard(s.handleSign))
 	// arweave-js 的浏览器构建随页面一起发，内嵌而不是走 CDN：
 	// 签名页在本机跑，不该依赖外网才能工作。
+	//
+	// 它不套 token：是公开的第三方库，不含任何与本机状态有关的东西，
+	// 而且 <script src> 带不了请求头。
 	mux.HandleFunc("/vendor/arweave.js", s.handleVendor(arweaveBundle, "text/javascript; charset=utf-8"))
 	mux.HandleFunc("/vendor/arweave-LICENSE.txt", s.handleVendor(arweaveLicense, "text/plain; charset=utf-8"))
 
@@ -92,12 +110,46 @@ func (s *Service) Start() error {
 	return nil
 }
 
-// URL 返回签名页的地址，供用户打开。
+// URL 返回签名页的地址，带上访问 token。
 func (s *Service) URL() string {
 	if s.listener == nil {
 		return ""
 	}
+	return s.baseURL() + "?token=" + s.token
+}
+
+// baseURL 返回不含 token 的根地址（带尾斜杠），供内部与测试拼接路径。
+func (s *Service) baseURL() string {
+	if s.listener == nil {
+		return ""
+	}
 	return "http://" + s.listener.Addr().String() + "/"
+}
+
+// Token 返回本次会话的访问 token。
+func (s *Service) Token() string { return s.token }
+
+// guard 给处理器套上 token 校验。
+//
+// 这个端点会把待上链的内容原样吐出来，比 webui 那边更要紧：
+// 光绑回环还不够，同机的任意网页都能向它发请求。
+func (s *Service) guard(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !s.tokenOK(r) {
+			http.Error(w, "缺少或错误的 token，请用启动时打印的地址访问", http.StatusForbidden)
+			return
+		}
+		next(w, r)
+	}
+}
+
+// tokenOK 接受两种带法：header 给普通请求，query 是给 EventSource 一类
+// 无法自定义请求头的场合留的。
+func (s *Service) tokenOK(r *http.Request) bool {
+	if r.Header.Get("X-Rog-Token") == s.token {
+		return true
+	}
+	return r.URL.Query().Get("token") == s.token
 }
 
 // Close 关掉服务。

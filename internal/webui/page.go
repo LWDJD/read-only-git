@@ -203,6 +203,16 @@ const DefaultPage = `<!doctype html>
   var site = '';
   var activeTarget = 'turbo';
 
+  // token 从地址栏取，所有请求都带上它。
+  // 服务只绑本机，但同机的任意网页都能向它发请求，靠这一层挡住别的页面。
+  var TOKEN = new URLSearchParams(location.search).get('token') || '';
+
+  function api(path, opts) {
+    var o = Object.assign({}, opts || {});
+    o.headers = Object.assign({}, o.headers || {}, { 'X-Rog-Token': TOKEN });
+    return fetch(path, o);
+  }
+
   function el(id) { return document.getElementById(id); }
 
   function fmtSize(n) {
@@ -224,7 +234,7 @@ const DefaultPage = `<!doctype html>
 
   // 拉一次状态并重画。任何写操作之后都要调用它，不做乐观更新。
   async function refresh() {
-    var res = await fetch('/api/state');
+    var res = await api('/api/state');
     var st = await res.json();
 
     site = st.site;
@@ -295,7 +305,7 @@ const DefaultPage = `<!doctype html>
       var bin = '';
       for (var i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
 
-      var res = await fetch('/api/files/replace', {
+      var res = await api('/api/files/replace', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ site: site, path: tr.dataset.path, bytes: btoa(bin) }),
@@ -308,7 +318,7 @@ const DefaultPage = `<!doctype html>
   }
 
   async function removeFile(path) {
-    var res = await fetch('/api/files/delete', {
+    var res = await api('/api/files/delete', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ site: site, path: path }),
@@ -324,7 +334,7 @@ const DefaultPage = `<!doctype html>
     clearLog();
     log('> ' + label);
 
-    var res = await fetch(url, {
+    var res = await api(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -333,7 +343,8 @@ const DefaultPage = `<!doctype html>
     if (!res.ok) { log('发起失败：' + (out.error || res.status), 'err'); return; }
     if (!out.taskId) { log('后端没有返回 taskId', 'err'); return; }
 
-    var src = new EventSource('/api/task/' + out.taskId + '/events');
+    // EventSource 不能自定义请求头，token 只能跟在 URL 上
+    var src = new EventSource('/api/task/' + out.taskId + '/events?token=' + encodeURIComponent(TOKEN));
     var seen = 0;
 
     src.onmessage = function (ev) {
@@ -343,7 +354,7 @@ const DefaultPage = `<!doctype html>
     src.addEventListener('end', function () {
       src.close();
       // 结束后拉一次状态与任务结果，顺便把签名页地址这类附加信息取出来
-      fetch('/api/task/' + out.taskId)
+      api('/api/task/' + out.taskId)
         .then(function (r) { return r.json(); })
         .then(function (t) {
           if (t.data && t.data.signUrl) {

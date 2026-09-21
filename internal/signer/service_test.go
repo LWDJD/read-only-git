@@ -13,10 +13,38 @@ import (
 	"github.com/LWDJD/read-only-git/internal/arweave"
 )
 
+// testGet 发一个带 token 的 GET。
+//
+// 服务会校验 token，测试里每次都要带上，干脆收在一个地方。
+func testGet(t *testing.T, svc *Service, path string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, svc.baseURL()+path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Rog-Token", svc.Token())
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return res
+}
+
 // playPage 模拟页面的行为：轮询任务、取内容、回传「签名」。
-func playPage(ctx context.Context, t *testing.T, base string) {
+//
+// token 是服务要求的访问凭证，页面从地址栏取，这里显式传。
+func playPage(ctx context.Context, t *testing.T, base, token string) {
 	t.Helper()
 	client := &http.Client{Timeout: 5 * time.Second}
+
+	get := func(path string) (*http.Response, error) {
+		req, err := http.NewRequest(http.MethodGet, base+path, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("X-Rog-Token", token)
+		return client.Do(req)
+	}
 
 	for {
 		select {
@@ -25,7 +53,7 @@ func playPage(ctx context.Context, t *testing.T, base string) {
 		default:
 		}
 
-		res, err := client.Get(base + "api/next")
+		res, err := get("api/next")
 		if err != nil {
 			t.Error(err)
 			return
@@ -44,7 +72,7 @@ func playPage(ctx context.Context, t *testing.T, base string) {
 			continue
 		}
 
-		blobRes, err := client.Get(base + "api/blob/" + task.ID)
+		blobRes, err := get("api/blob/" + task.ID)
 		if err != nil {
 			t.Error(err)
 			return
@@ -53,8 +81,14 @@ func playPage(ctx context.Context, t *testing.T, base string) {
 		blobRes.Body.Close()
 
 		signed := append([]byte("signed:"), data...)
-		signRes, err := client.Post(base+"api/sign/"+task.ID,
-			"application/octet-stream", bytes.NewReader(signed))
+		req, err := http.NewRequest(http.MethodPost, base+"api/sign/"+task.ID, bytes.NewReader(signed))
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		req.Header.Set("Content-Type", "application/octet-stream")
+		req.Header.Set("X-Rog-Token", token)
+		signRes, err := client.Do(req)
 		if err != nil {
 			t.Error(err)
 			return
@@ -72,7 +106,7 @@ func TestSignRoundTrip(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	go playPage(ctx, t, svc.URL())
+	go playPage(ctx, t, svc.baseURL(), svc.Token())
 
 	signed, err := svc.Sign(ctx, []byte("payload"), []arweave.Tag{{Name: "Path", Value: "a.txt"}})
 	if err != nil {
@@ -92,7 +126,7 @@ func TestSignMultipleSequentially(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	go playPage(ctx, t, svc.URL())
+	go playPage(ctx, t, svc.baseURL(), svc.Token())
 
 	for _, want := range []string{"one", "two", "three"} {
 		signed, err := svc.Sign(ctx, []byte(want), nil)
@@ -112,18 +146,25 @@ func TestServesPageOnLoopbackOnly(t *testing.T) {
 	}
 	defer svc.Close()
 
-	if !strings.HasPrefix(svc.URL(), "http://127.0.0.1:") {
-		t.Fatalf("应当只绑回环地址，实际 %q", svc.URL())
+	if !strings.HasPrefix(svc.baseURL(), "http://127.0.0.1:") {
+		t.Fatalf("应当只绑回环地址，实际 %q", svc.baseURL())
 	}
 
-	res, err := http.Get(svc.URL())
-	if err != nil {
-		t.Fatal(err)
-	}
+	res := testGet(t, svc, "")
 	defer res.Body.Close()
 	body, _ := io.ReadAll(res.Body)
 	if !strings.Contains(string(body), "hello-page") {
 		t.Fatalf("页面内容不对: %q", body)
+	}
+
+	// 不带 token 的请求要被挡下，否则同机的任意网页都能拿到待签名内容
+	bare, err := http.Get(svc.baseURL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bare.Body.Close()
+	if bare.StatusCode != http.StatusForbidden {
+		t.Fatalf("不带 token 应当被拒，实际 %d", bare.StatusCode)
 	}
 }
 
@@ -134,10 +175,7 @@ func TestNextReportsEmptyWhenIdle(t *testing.T) {
 	}
 	defer svc.Close()
 
-	res, err := http.Get(svc.URL() + "api/next")
-	if err != nil {
-		t.Fatal(err)
-	}
+	res := testGet(t, svc, "api/next")
 	defer res.Body.Close()
 
 	var task Request
@@ -180,7 +218,7 @@ func TestPendingCountsUnfinished(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	go playPage(ctx, t, svc.URL())
+	go playPage(ctx, t, svc.baseURL(), svc.Token())
 
 	if _, err := svc.Sign(ctx, []byte("x"), nil); err != nil {
 		t.Fatal(err)
@@ -197,10 +235,7 @@ func TestUnknownTaskReturnsNotFound(t *testing.T) {
 	}
 	defer svc.Close()
 
-	res, err := http.Get(svc.URL() + "api/blob/deadbeef")
-	if err != nil {
-		t.Fatal(err)
-	}
+	res := testGet(t, svc, "api/blob/deadbeef")
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusNotFound {
 		t.Fatalf("未知任务应 404，实际 %d", res.StatusCode)

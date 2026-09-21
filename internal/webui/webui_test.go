@@ -14,6 +14,12 @@ import (
 	"time"
 )
 
+// testToken 是当前测试服务的访问 token。
+//
+// 测试串行执行，每个用例起自己的服务，这个包级量够用；
+// 请求辅助函数自己去拿它，不必让每个调用点都传一遍。
+var testToken string
+
 func newTestServer(t *testing.T, site string) *Server {
 	t.Helper()
 	// 端口传 0：测试之间互不干扰，由系统挑空闲的
@@ -21,6 +27,7 @@ func newTestServer(t *testing.T, site string) *Server {
 	if err := srv.Start(); err != nil {
 		t.Fatal(err)
 	}
+	testToken = srv.Token()
 	t.Cleanup(func() { _ = srv.Close() })
 	return srv
 }
@@ -47,14 +54,23 @@ func TestServerHonorsFixedPort(t *testing.T) {
 	}
 	defer srv.Close()
 
-	if !strings.HasSuffix(srv.URL(), ":"+strconv.Itoa(port)+"/") {
-		t.Fatalf("URL 应当用指定端口，实际 %s", srv.URL())
+	if !strings.HasSuffix(srv.baseURL(), ":"+strconv.Itoa(port)+"/") {
+		t.Fatalf("baseURL 应当用指定端口，实际 %s", srv.baseURL())
+	}
+	// 给用户打开的地址要带上 token
+	if !strings.Contains(srv.URL(), "?token="+srv.Token()) {
+		t.Fatalf("URL 应当带上 token，实际 %s", srv.URL())
 	}
 }
 
 func getJSON(t *testing.T, url string, into any) {
 	t.Helper()
-	res, err := http.Get(url)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Rog-Token", testToken)
+	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +86,13 @@ func postJSON(t *testing.T, url string, body any) (int, map[string]any) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	res, err := http.Post(url, "application/json", bytes.NewReader(data))
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Rog-Token", testToken)
+	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +138,7 @@ func TestStateListsFilesWithDigest(t *testing.T) {
 	srv := newTestServer(t, site)
 
 	var st stateResponse
-	getJSON(t, srv.URL()+"api/state", &st)
+	getJSON(t, srv.baseURL()+"api/state", &st)
 
 	if !st.Exists {
 		t.Fatal("站点应当被认作存在")
@@ -148,7 +170,7 @@ func TestStateSkipsStateDir(t *testing.T) {
 	srv := newTestServer(t, site)
 
 	var st stateResponse
-	getJSON(t, srv.URL()+"api/state", &st)
+	getJSON(t, srv.baseURL()+"api/state", &st)
 
 	for _, f := range st.Files {
 		if strings.HasPrefix(f.Path, ".rog") {
@@ -174,9 +196,9 @@ func TestReplaceThenStateShowsNewDigest(t *testing.T) {
 	srv := newTestServer(t, site)
 
 	var before stateResponse
-	getJSON(t, srv.URL()+"api/state", &before)
+	getJSON(t, srv.baseURL()+"api/state", &before)
 
-	code, _ := postJSON(t, srv.URL()+"api/files/replace", map[string]any{
+	code, _ := postJSON(t, srv.baseURL()+"api/files/replace", map[string]any{
 		"site":  site,
 		"path":  "a.txt",
 		"bytes": base64.StdEncoding.EncodeToString([]byte("brand new content")),
@@ -186,7 +208,7 @@ func TestReplaceThenStateShowsNewDigest(t *testing.T) {
 	}
 
 	var after stateResponse
-	getJSON(t, srv.URL()+"api/state", &after)
+	getJSON(t, srv.baseURL()+"api/state", &after)
 
 	if before.Files[0].Digest == after.Files[0].Digest {
 		t.Fatal("替换后摘要应当变化，说明状态确实重新扫过")
@@ -204,7 +226,7 @@ func TestReplaceRejectsEscape(t *testing.T) {
 	site := t.TempDir()
 	srv := newTestServer(t, site)
 
-	code, out := postJSON(t, srv.URL()+"api/files/replace", map[string]any{
+	code, out := postJSON(t, srv.baseURL()+"api/files/replace", map[string]any{
 		"site":  site,
 		"path":  "../evil.txt",
 		"bytes": base64.StdEncoding.EncodeToString([]byte("x")),
@@ -223,7 +245,7 @@ func TestDeleteFile(t *testing.T) {
 
 	srv := newTestServer(t, site)
 
-	code, _ := postJSON(t, srv.URL()+"api/files/delete", map[string]any{"site": site, "path": "a.txt"})
+	code, _ := postJSON(t, srv.baseURL()+"api/files/delete", map[string]any{"site": site, "path": "a.txt"})
 	if code != http.StatusOK {
 		t.Fatalf("删除应当成功，实际 %d", code)
 	}
@@ -236,7 +258,7 @@ func TestDeleteFile(t *testing.T) {
 func TestPackTaskReportsFailure(t *testing.T) {
 	srv := newTestServer(t, t.TempDir())
 
-	code, out := postJSON(t, srv.URL()+"api/pack", map[string]any{
+	code, out := postJSON(t, srv.baseURL()+"api/pack", map[string]any{
 		"source": filepath.Join(t.TempDir(), "does-not-exist"),
 		"outDir": t.TempDir(),
 	})
@@ -251,7 +273,7 @@ func TestPackTaskReportsFailure(t *testing.T) {
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		var snap map[string]any
-		getJSON(t, srv.URL()+"api/task/"+taskID, &snap)
+		getJSON(t, srv.baseURL()+"api/task/"+taskID, &snap)
 
 		switch snap["status"] {
 		case "failed":
@@ -271,7 +293,7 @@ func TestPackTaskReportsFailure(t *testing.T) {
 func TestPackRejectsEmptySource(t *testing.T) {
 	srv := newTestServer(t, t.TempDir())
 
-	code, _ := postJSON(t, srv.URL()+"api/pack", map[string]any{"source": "   "})
+	code, _ := postJSON(t, srv.baseURL()+"api/pack", map[string]any{"source": "   "})
 	if code != http.StatusBadRequest {
 		t.Fatalf("空源仓库应当在建任务前被拒，实际 %d", code)
 	}
@@ -281,7 +303,7 @@ func TestPackRejectsEmptySource(t *testing.T) {
 func TestPageIsSelfContained(t *testing.T) {
 	srv := newTestServer(t, t.TempDir())
 
-	res, err := http.Get(srv.URL())
+	res, err := http.Get(srv.baseURL() + "?token=" + srv.Token())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -300,5 +322,39 @@ func TestPageIsSelfContained(t *testing.T) {
 		if strings.Contains(body, bad) {
 			t.Fatalf("界面不该引用外部资源，出现了 %q", bad)
 		}
+	}
+}
+
+// 不带 token 的请求一律拒掉。
+//
+// 服务只绑 127.0.0.1，但同机的任意网页都能向它发请求，
+// 一个恶意页面就能让浏览器替它改站点文件、发起发布。
+func TestRequestsWithoutTokenAreRejected(t *testing.T) {
+	site := t.TempDir()
+	if err := os.WriteFile(filepath.Join(site, "a.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv := newTestServer(t, site)
+
+	// 首页与各接口都不该放行
+	for _, path := range []string{"", "api/state", "api/files/delete"} {
+		res, err := http.Get(srv.baseURL() + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res.Body.Close()
+		if res.StatusCode != http.StatusForbidden {
+			t.Fatalf("%q 不带 token 应当被拒，实际 %d", path, res.StatusCode)
+		}
+	}
+
+	// 带错 token 同样不行
+	res, err := http.Get(srv.baseURL() + "api/state?token=wrong")
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	if res.StatusCode != http.StatusForbidden {
+		t.Fatalf("错误 token 应当被拒，实际 %d", res.StatusCode)
 	}
 }

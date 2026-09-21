@@ -36,6 +36,16 @@ const DefaultPage = `<!doctype html>
   var logEl = document.getElementById('log');
   var goEl = document.getElementById('go');
 
+  // token 从地址栏取，所有请求都带上。服务只绑本机，
+  // 但同机的任意网页都能向它发请求，靠这一层挡住别的页面。
+  var TOKEN = new URLSearchParams(location.search).get('token') || '';
+
+  function api(path, opts) {
+    var o = Object.assign({}, opts || {});
+    o.headers = Object.assign({}, o.headers || {}, { 'X-Rog-Token': TOKEN });
+    return fetch(path, o);
+  }
+
   function say(text) { statusEl.textContent = text; }
 
   function addLine(text) {
@@ -127,7 +137,7 @@ const DefaultPage = `<!doctype html>
     for (;;) {
       var task = null;
       try {
-        var res = await fetch('/api/next', { cache: 'no-store' });
+        var res = await api('/api/next', { cache: 'no-store' });
         task = await res.json();
       } catch (e) {
         // 连不上后端。很可能它已经收工并把服务关了，这不是错误，
@@ -154,7 +164,7 @@ const DefaultPage = `<!doctype html>
       }
 
       try {
-        var res = await fetch('/api/blob/' + task.id);
+        var res = await api('/api/blob/' + task.id);
         if (!res.ok) throw new Error('取内容失败：' + res.status);
         var buf = await res.arrayBuffer();
         // 两类任务的产物不同：
@@ -165,7 +175,7 @@ const DefaultPage = `<!doctype html>
         var signed = task.kind === 'tx'
           ? await signBundleTransaction(buf, task.tags)
           : await wallet().signDataItem({ data: new Uint8Array(buf), tags: task.tags });
-        await fetch('/api/sign/' + task.id, { method: 'POST', body: signed });
+        await api('/api/sign/' + task.id, { method: 'POST', body: signed });
       } catch (e) {
         say('签名失败（' + describe(task) + '）：' + (e && e.message ? e.message : String(e)));
         return;

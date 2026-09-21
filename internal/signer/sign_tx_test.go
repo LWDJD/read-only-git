@@ -16,10 +16,7 @@ func nextTask(t *testing.T, svc *Service) Request {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
 	for {
-		res, err := http.Get(svc.URL() + "api/next")
-		if err != nil {
-			t.Fatal(err)
-		}
+		res := testGet(t, svc, "api/next")
 		var task Request
 		decodeErr := json.NewDecoder(res.Body).Decode(&task)
 		res.Body.Close()
@@ -38,7 +35,13 @@ func nextTask(t *testing.T, svc *Service) Request {
 
 func postSignature(t *testing.T, svc *Service, id, body string) {
 	t.Helper()
-	res, err := http.Post(svc.URL()+"api/sign/"+id, "application/json", strings.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, svc.baseURL()+"api/sign/"+id, strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Rog-Token", svc.Token())
+	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -264,7 +267,8 @@ func TestVendorAssetsAreServed(t *testing.T) {
 	defer svc.Close()
 
 	for _, path := range []string{"vendor/arweave.js", "vendor/arweave-LICENSE.txt"} {
-		res, err := http.Get(svc.URL() + path)
+		// vendor 下的东西是公开的第三方库，不套 token，用普通 GET 即可
+		res, err := http.Get(svc.baseURL() + path)
 		if err != nil {
 			t.Fatal(err)
 		}
