@@ -5,7 +5,7 @@ import { RemoteRepo } from './git/repo.js'
  *
  * 之所以要这个小文件：静态托管没有目录列表 API，而 manifest / IPFS /
  * Pages / EdgeOne 都无法告诉你"这个目录下有什么"。用一份清单换取跨平台
- * 通用性，代价是新增仓库时要更新它（prepare-repo 脚本会自动维护）。
+ * 通用性，代价是新增仓库时要更新它（rog pack 会自动维护）。
  */
 
 const repoCache = new Map()

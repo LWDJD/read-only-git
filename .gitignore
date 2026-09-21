@@ -11,7 +11,7 @@ tmp/
 __pycache__/
 *.pyc
 
-# 部署产物：裸仓库由 prepare-repo 脚本生成，不进版本库
+# 部署产物：裸仓库由 rog pack 生成，不进版本库
 public/*.git/
 
 # Go 构建产物（含构建覆盖时留下的临时名）
