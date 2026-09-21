@@ -16,70 +16,110 @@ const DefaultPage = `<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>read-only-git · 维护台</title>
 <style>
-  :root { color-scheme: light dark; }
+  /* 颜色全部走变量：深色模式只改这一组值。
+     之前把颜色硬编码在各处，深色只覆盖了一部分，就会出现「字变白了、
+     输入框底还是白的」这种事。 */
+  :root {
+    color-scheme: light dark;
+
+    --bg: #f6f7f9;
+    --fg: #1f2328;
+    --panel: #ffffff;
+    --border: #d0d7de;
+    --border-soft: #eaeef2;
+    --muted: #656d76;
+    --field-bg: #ffffff;
+    --field-border: #d0d7de;
+    --chip: #eaeef2;
+    --btn: #f6f8fa;
+    --btn-hover: #eef1f4;
+    --link: #0969da;
+    --ok: #1a7f37;
+    --err: #cf222e;
+    --accent: #1f883d;
+    --accent-strong: #1a7f37;
+    --on-accent: #ffffff;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0d1117;
+      --fg: #e6edf3;
+      --panel: #161b22;
+      --border: #30363d;
+      --border-soft: #21262d;
+      --muted: #8b949e;
+      --field-bg: #0d1117;
+      --field-border: #30363d;
+      --chip: #21262d;
+      --btn: #21262d;
+      --btn-hover: #30363d;
+      --link: #4493f8;
+      --ok: #3fb950;
+      --err: #f85149;
+      --accent: #238636;
+      --accent-strong: #2ea043;
+      --on-accent: #ffffff;
+    }
+  }
+
   * { box-sizing: border-box; }
   body {
     font: 14px/1.6 system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
-    margin: 0; padding: 0 0 40px; background: #f6f7f9; color: #1f2328;
-  }
-  @media (prefers-color-scheme: dark) {
-    body { background: #0d1117; color: #e6edf3; }
-    .panel, .logbox { background: #161b22; border-color: #30363d; }
-    input, select, textarea { background: #0d1117; border-color: #30363d; color: #e6edf3; }
-    th { border-color: #30363d; }
-    td { border-color: #21262d; }
-    .muted { color: #8b949e; }
-    .chip { background: #21262d; }
+    margin: 0; padding: 0 0 40px; background: var(--bg); color: var(--fg);
   }
   header {
-    padding: 14px 20px; border-bottom: 1px solid #d0d7de; display: flex;
+    padding: 14px 20px; border-bottom: 1px solid var(--border); display: flex;
     align-items: baseline; gap: 12px; flex-wrap: wrap;
   }
   header h1 { font-size: 16px; margin: 0; }
-  .muted { color: #656d76; font-size: 13px; }
+  .muted { color: var(--muted); font-size: 13px; }
   main { display: grid; grid-template-columns: 380px minmax(0, 1fr); gap: 16px; padding: 16px 20px; }
   @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
   .panel {
-    background: #fff; border: 1px solid #d0d7de; border-radius: 6px;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
     padding: 12px 14px; margin-bottom: 14px;
   }
   .panel h2 { font-size: 13px; margin: 0 0 10px; letter-spacing: .02em; }
-  label { display: block; font-size: 12px; margin: 8px 0 3px; color: #656d76; }
+  label { display: block; font-size: 12px; margin: 8px 0 3px; color: var(--muted); }
   input, select {
     width: 100%; padding: 6px 8px; font: inherit; font-size: 13px;
-    border: 1px solid #d0d7de; border-radius: 4px; background: #fff; color: inherit;
+    border: 1px solid var(--field-border); border-radius: 4px;
+    background: var(--field-bg); color: var(--fg);
   }
+  input::placeholder { color: var(--muted); opacity: .75; }
   .row { display: flex; gap: 8px; }
   .row > * { flex: 1; }
   button {
     font: inherit; font-size: 13px; padding: 6px 12px; margin-top: 10px;
-    border: 1px solid #d0d7de; border-radius: 5px; background: #f6f8fa;
-    color: inherit; cursor: pointer;
+    border: 1px solid var(--border); border-radius: 5px;
+    background: var(--btn); color: var(--fg); cursor: pointer;
   }
-  button:hover { background: #eef1f4; }
-  button.primary { background: #1f883d; border-color: #1a7f37; color: #fff; }
-  button.primary:hover { background: #1a7f37; }
+  button:hover { background: var(--btn-hover); }
+  button.primary { background: var(--accent); border-color: var(--accent-strong); color: var(--on-accent); }
+  button.primary:hover { background: var(--accent-strong); }
   button:disabled { opacity: .55; cursor: default; }
   .tabs { display: flex; gap: 4px; margin-bottom: 6px; }
   .tabs button { flex: 1; margin-top: 0; }
-  .tabs button.active { background: #1f883d; border-color: #1a7f37; color: #fff; }
+  .tabs button.active { background: var(--accent); border-color: var(--accent-strong); color: var(--on-accent); }
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  th, td { text-align: left; padding: 5px 6px; border-bottom: 1px solid #eaeef2; }
-  th { font-size: 12px; color: #656d76; font-weight: 600; border-bottom-color: #d0d7de; }
+  th, td { text-align: left; padding: 5px 6px; border-bottom: 1px solid var(--border-soft); }
+  th { font-size: 12px; color: var(--muted); font-weight: 600; border-bottom-color: var(--border); }
   td.mono, .mono { font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
-  tr.drop { background: #ddf4e4; }
+  tr.drop { background: var(--chip); }
   .chip {
     display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 10px;
-    background: #eaeef2; margin-left: 6px;
+    background: var(--chip); margin-left: 6px;
   }
   .logbox {
-    background: #fff; border: 1px solid #d0d7de; border-radius: 6px;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
     margin: 0 20px; padding: 10px 12px; height: 220px; overflow: auto;
     font-family: ui-monospace, Consolas, monospace; font-size: 12px; white-space: pre-wrap;
+    color: var(--fg);
   }
-  .err { color: #cf222e; }
-  .ok { color: #1a7f37; }
-  a { color: #0969da; }
+  .err { color: var(--err); }
+  .ok { color: var(--ok); }
+  a { color: var(--link); }
   h2 { display: flex; align-items: center; justify-content: space-between; }
 </style>
 </head>
