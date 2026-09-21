@@ -29,6 +29,7 @@ const DefaultPage = `<!doctype html>
 <button id="go" hidden>开始签名</button>
 <ol id="log"></ol>
 
+<script src="/vendor/arweave.js"></script>
 <script>
 (function () {
   var statusEl = document.getElementById('status');
@@ -44,6 +45,32 @@ const DefaultPage = `<!doctype html>
   }
 
   function wallet() { return window.arweaveWallet; }
+
+  /**
+   * 让钱包给一笔「data 就是这一整包」的交易签名。
+   *
+   * arweave-js 在这里只做两件事：构造交易（算 data_root、reward、last_tx），
+   * 以及把交易交给钱包签。签完只回传字段，包体不动，
+   * 免得整份内容再多走一趟 base64。
+   */
+  async function signBundleTransaction(buf, tags) {
+    if (!window.Arweave) throw new Error('arweave-js 没加载出来');
+    var arweave = window.Arweave.init({ host: 'arweave.net', port: 443, protocol: 'https' });
+    var tx = await arweave.createTransaction({ data: new Uint8Array(buf) });
+    var list = tags || [];
+    for (var i = 0; i < list.length; i++) {
+      tx.addTag(list[i].name, list[i].value);
+    }
+    // 省略 JWK 参数时 arweave-js 会走注入的钱包
+    await arweave.transactions.sign(tx);
+    return JSON.stringify({
+      id: tx.id,
+      owner: tx.owner,
+      signature: tx.signature,
+      reward: tx.reward,
+      last_tx: tx.last_tx,
+    });
+  }
 
   function delay(ms) {
     return new Promise(function (r) { setTimeout(r, ms); });
@@ -96,12 +123,14 @@ const DefaultPage = `<!doctype html>
         var res = await fetch('/api/blob/' + task.id);
         if (!res.ok) throw new Error('取内容失败：' + res.status);
         var buf = await res.arrayBuffer();
-        // 钱包的 signDataItem 只接受 string 或 Uint8Array。
-        // 直接递 ArrayBuffer 会被它内部的断言挡下（Input is not an ArrayBuffer）。
-        var signed = await wallet().signDataItem({
-          data: new Uint8Array(buf),
-          tags: task.tags,
-        });
+        // 两类任务的产物不同：
+        //   dataitem 回传签名字节
+        //   tx       回传交易的签名字段
+        // 另外，钱包的 signDataItem 只接受 string 或 Uint8Array，
+        // 直接递 ArrayBuffer 会被它内部的断言挡下。
+        var signed = task.kind === 'tx'
+          ? await signBundleTransaction(buf, task.tags)
+          : await wallet().signDataItem({ data: new Uint8Array(buf), tags: task.tags });
         await fetch('/api/sign/' + task.id, { method: 'POST', body: signed });
       } catch (e) {
         say('签名失败（' + describe(task) + '）：' + (e && e.message ? e.message : String(e)));

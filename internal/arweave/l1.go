@@ -55,6 +55,14 @@ type TxSignature struct {
 	LastTx    string `json:"last_tx"`
 }
 
+// TxSigner 是交易签名通道：把 bundle 与 tags 交给钱包，拿回交易的签名字段。
+//
+// 与 Signer 的区别在于签的对象不同：Signer 签的是一个个 data item，
+// TxSigner 签的是「data 为整个 bundle」的那笔外层交易。
+type TxSigner interface {
+	SignTx(ctx context.Context, data []byte, tags []Tag) (*TxSignature, error)
+}
+
 // SubmitTx 用签名字段与 bundle 字节拼出一笔交易，POST 给节点，返回交易 id。
 func SubmitTx(ctx context.Context, node string, bundle []byte, tags []Tag, sig *TxSignature, client *http.Client) (string, error) {
 	if strings.TrimSpace(node) == "" {

@@ -22,10 +22,19 @@ import (
 )
 
 // Request 是一次待签名任务，页面从 /api/next 拿到它。
+//
+// Kind 告诉页面这次要做什么：给 data item 签个名，还是给一笔交易签个名。
 type Request struct {
 	ID   string        `json:"id"`
+	Kind string        `json:"kind,omitempty"`
 	Tags []arweave.Tag `json:"tags"`
 }
+
+// 任务类型。dataitem 回传签名字节，tx 回传一笔交易的字段。
+const (
+	KindDataItem = "dataitem"
+	KindTx       = "tx"
+)
 
 // Service 是本机签名服务。
 type Service struct {
@@ -39,6 +48,7 @@ type Service struct {
 
 type item struct {
 	id       string
+	kind     string
 	data     []byte
 	tags     []arweave.Tag
 	result   chan []byte
@@ -69,6 +79,10 @@ func (s *Service) Start() error {
 	mux.HandleFunc("/api/next", s.handleNext)
 	mux.HandleFunc("/api/blob/", s.handleBlob)
 	mux.HandleFunc("/api/sign/", s.handleSign)
+	// arweave-js 的浏览器构建随页面一起发，内嵌而不是走 CDN：
+	// 签名页在本机跑，不该依赖外网才能工作。
+	mux.HandleFunc("/vendor/arweave.js", s.handleVendor(arweaveBundle, "text/javascript; charset=utf-8"))
+	mux.HandleFunc("/vendor/arweave-LICENSE.txt", s.handleVendor(arweaveLicense, "text/plain; charset=utf-8"))
 
 	s.server = &http.Server{
 		Handler:           mux,
@@ -98,8 +112,33 @@ func (s *Service) Close() error {
 
 // Sign 实现 arweave.Signer：把内容排进待签队列，等页面把结果送回来。
 func (s *Service) Sign(ctx context.Context, data []byte, tags []arweave.Tag) ([]byte, error) {
+	return s.enqueue(ctx, KindDataItem, data, tags)
+}
+
+// SignTx 实现 arweave.TxSigner：让钱包给一笔「data 就是这个数据」的交易签名。
+//
+// 页面回传的是交易字段而不是整笔交易：data 可能是整个 bundle，回传它要多走
+// 一次 base64，而那串字节 Go 这边本来就有，自己拼更省。
+func (s *Service) SignTx(ctx context.Context, data []byte, tags []arweave.Tag) (*arweave.TxSignature, error) {
+	raw, err := s.enqueue(ctx, KindTx, data, tags)
+	if err != nil {
+		return nil, err
+	}
+	var sig arweave.TxSignature
+	if err := json.Unmarshal(raw, &sig); err != nil {
+		return nil, fmt.Errorf("钱包回传的交易字段无法解析: %w", err)
+	}
+	if sig.ID == "" || sig.Owner == "" || sig.Signature == "" {
+		return nil, fmt.Errorf("钱包回传的交易字段不完整（缺 id / owner / signature）")
+	}
+	return &sig, nil
+}
+
+// enqueue 把一次签名任务排进队列，并等页面把结果送回来。
+func (s *Service) enqueue(ctx context.Context, kind string, data []byte, tags []arweave.Tag) ([]byte, error) {
 	it := &item{
 		id:     newID(),
+		kind:   kind,
 		data:   data,
 		tags:   tags,
 		result: make(chan []byte, 1),
@@ -136,6 +175,14 @@ func (s *Service) Pending() int {
 
 // ---------- HTTP ----------
 
+// handleVendor 提供内嵌的静态资源。
+func (s *Service) handleVendor(body []byte, contentType string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", contentType)
+		_, _ = w.Write(body)
+	}
+}
+
 func (s *Service) handlePage(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
 		http.NotFound(w, r)
@@ -161,7 +208,7 @@ func (s *Service) handleNext(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, Request{})
 		return
 	}
-	writeJSON(w, Request{ID: next.id, Tags: next.tags})
+	writeJSON(w, Request{ID: next.id, Kind: next.kind, Tags: next.tags})
 }
 
 func (s *Service) handleBlob(w http.ResponseWriter, r *http.Request) {
