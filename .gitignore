@@ -17,3 +17,6 @@ public/*.git/
 # Go 构建产物
 /rog
 /rog.exe
+
+# 本地交接笔记：只是给自己看的上下文备忘，不作为项目内容
+HANDOFF.md
