@@ -101,6 +101,60 @@ func TestSignTxReturnsParsedFields(t *testing.T) {
 	}
 }
 
+// 分块任务：页面把各块的 proof 一并回传，Go 要能原样解析。
+// 这条路的依据必须与签名完全同一份，解析错一位整包就废。
+func TestSignTxParsesChunkProofs(t *testing.T) {
+	svc := New([]byte("<html></html>"))
+	if err := svc.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer svc.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	got := make(chan *arweave.TxSignature, 1)
+	go func() {
+		sig, err := svc.SignTx(ctx, []byte("bundle"), nil)
+		if err != nil {
+			got <- nil
+			return
+		}
+		got <- sig
+	}()
+
+	task := nextTask(t, svc)
+	postSignature(t, svc, task.ID, `{
+		"id":"tx-1","owner":"o","signature":"s",
+		"data_root":"root","data_size":"300000",
+		"proofs":[
+			{"data_path":"p0","offset":"262143"},
+			{"data_path":"p1","offset":"300000"}
+		]
+	}`)
+
+	select {
+	case sig := <-got:
+		if sig == nil {
+			t.Fatal("解析失败")
+		}
+		if sig.DataSize != "300000" {
+			t.Fatalf("data_size 没解析对: %+v", sig)
+		}
+		if len(sig.Proofs) != 2 {
+			t.Fatalf("proofs 应当有 2 条，实际 %d", len(sig.Proofs))
+		}
+		if sig.Proofs[0].DataPath != "p0" || sig.Proofs[0].Offset != "262143" {
+			t.Fatalf("第 0 条 proof 不对: %+v", sig.Proofs[0])
+		}
+		if sig.Proofs[1].DataPath != "p1" || sig.Proofs[1].Offset != "300000" {
+			t.Fatalf("第 1 条 proof 不对: %+v", sig.Proofs[1])
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("等不到签名结果")
+	}
+}
+
 // 内容类任务的 kind 是 dataitem，保持原有行为。
 func TestSignDataItemCarriesKind(t *testing.T) {
 	svc := New([]byte("<html></html>"))

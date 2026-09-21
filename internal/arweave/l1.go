@@ -57,6 +57,11 @@ type TxSignature struct {
 	Reward    string `json:"reward"`
 	LastTx    string `json:"last_tx"`
 	DataRoot  string `json:"data_root"`
+	// DataSize 是这一包的字节数，与 DataRoot 一起描述这份数据。
+	DataSize string `json:"data_size"`
+	// Proofs 是各块的 Merkle 证明，按块序排列，只在需要分块时用得上。
+	// 单块时 /tx 直接带 data，节点自己会算，用不着它。
+	Proofs []ChunkProof `json:"proofs,omitempty"`
 }
 
 // TxSigner 是交易签名通道：把 bundle 与 tags 交给钱包，拿回交易的签名字段。

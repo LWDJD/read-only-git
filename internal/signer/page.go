@@ -63,6 +63,19 @@ const DefaultPage = `<!doctype html>
     }
     // 省略 JWK 参数时 arweave-js 会走注入的钱包
     await arweave.transactions.sign(tx);
+
+    // proofs 供 Go 侧走分块上传。超过一块时交易 JSON 不带 data，
+    // 由 Go 按同样的切法逐块发 /chunk。
+    // 不回传块内容本身：那等于把整包再传一遍。
+    var chunkProofs = [];
+    var proofList = (tx.chunks && tx.chunks.proofs) || [];
+    for (var k = 0; k < proofList.length; k++) {
+      chunkProofs.push({
+        data_path: toB64Url(proofList[k].proof),
+        offset: String(proofList[k].offset),
+      });
+    }
+
     return JSON.stringify({
       id: tx.id,
       owner: tx.owner,
@@ -72,7 +85,25 @@ const DefaultPage = `<!doctype html>
       // data_root 是签名内容的一部分，Go 侧要拿它拼交易 JSON。
       // 交易 JSON 里漏了这个字段，签名就不再自洽，节点会拒。
       data_root: tx.data_root,
+      data_size: tx.data_size,
+      proofs: chunkProofs,
     });
+  }
+
+  /**
+   * base64url 编码，不带填充。
+   *
+   * 优先用 arweave-js 的；取不到就自己编一份，
+   * 免得因为一个工具函数让整条分块路径在某个版本上失效。
+   */
+  function toB64Url(bytes) {
+    var u = window.Arweave && window.Arweave.utils;
+    if (u && typeof u.bufferTob64Url === 'function') {
+      return u.bufferTob64Url(bytes);
+    }
+    var bin = '';
+    for (var i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
   }
 
   function delay(ms) {
