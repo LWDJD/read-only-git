@@ -47,12 +47,16 @@ func BundleTags(repo string) []Tag {
 //
 // 刻意不含 data：签名内容里已经绑定了 data_root，而 bundle 字节本来就在 Go 这边，
 // 让它回传只会多一次 base64 膨胀。
+//
+// DataRoot 不能省。format 2 交易的签名内容里就含它，节点验签时也按它校，
+// 交易 JSON 里漏掉这个字段，签名字段本身就不再自洽。
 type TxSignature struct {
 	ID        string `json:"id"`
 	Owner     string `json:"owner"`
 	Signature string `json:"signature"`
 	Reward    string `json:"reward"`
 	LastTx    string `json:"last_tx"`
+	DataRoot  string `json:"data_root"`
 }
 
 // TxSigner 是交易签名通道：把 bundle 与 tags 交给钱包，拿回交易的签名字段。
@@ -74,6 +78,11 @@ func SubmitTx(ctx context.Context, node string, bundle []byte, tags []Tag, sig *
 	if sig.ID == "" || sig.Owner == "" || sig.Signature == "" {
 		return "", fmt.Errorf("签名字段不完整：id / owner / signature 缺一不可")
 	}
+	// data_root 与签名是绑在一起的：签名算的就是它。
+	// 交易里漏掉它，节点拿到的就是一笔自称与签名不符的交易。
+	if sig.DataRoot == "" {
+		return "", fmt.Errorf("签名字段缺少 data_root：交易签名绑定了它，不能省")
+	}
 	if err := CheckBundleSize(len(bundle)); err != nil {
 		return "", err
 	}
@@ -89,6 +98,7 @@ func SubmitTx(ctx context.Context, node string, bundle []byte, tags []Tag, sig *
 		Target    string `json:"target"`
 		Quantity  string `json:"quantity"`
 		Data      string `json:"data"`
+		DataRoot  string `json:"data_root"`
 		DataSize  string `json:"data_size"`
 		Reward    string `json:"reward"`
 		Signature string `json:"signature"`
@@ -101,6 +111,7 @@ func SubmitTx(ctx context.Context, node string, bundle []byte, tags []Tag, sig *
 		Target:    "",
 		Quantity:  "0",
 		Data:      base64.RawURLEncoding.EncodeToString(bundle),
+		DataRoot:  sig.DataRoot,
 		DataSize:  strconv.Itoa(len(bundle)),
 		Reward:    sig.Reward,
 		Signature: sig.Signature,

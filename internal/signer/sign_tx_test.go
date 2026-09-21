@@ -81,7 +81,7 @@ func TestSignTxReturnsParsedFields(t *testing.T) {
 	}
 
 	postSignature(t, svc, task.ID,
-		`{"id":"tx-1","owner":"owner-1","signature":"sig-1","reward":"100","last_tx":"anchor"}`)
+		`{"id":"tx-1","owner":"owner-1","signature":"sig-1","reward":"100","last_tx":"anchor","data_root":"root-1"}`)
 
 	select {
 	case sig := <-got:
@@ -90,6 +90,9 @@ func TestSignTxReturnsParsedFields(t *testing.T) {
 		}
 		if sig.Reward != "100" || sig.LastTx != "anchor" {
 			t.Fatalf("reward 与 last_tx 也要带上: %+v", sig)
+		}
+		if sig.DataRoot != "root-1" {
+			t.Fatalf("data_root 也要带上: %+v", sig)
 		}
 	case err := <-failed:
 		t.Fatal(err)

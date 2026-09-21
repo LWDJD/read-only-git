@@ -63,6 +63,7 @@ func (s *stubTxSigner) SignTx(ctx context.Context, data []byte, tags []Tag) (*Tx
 		Signature: "sig",
 		Reward:    "1000",
 		LastTx:    "anchor",
+		DataRoot:  "stub-root",
 	}, nil
 }
 

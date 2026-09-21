@@ -75,6 +75,7 @@ func TestSubmitTxPostsTransactionJSON(t *testing.T) {
 		Signature: "sig-b64",
 		Reward:    "12345",
 		LastTx:    "anchor-1",
+		DataRoot:  "root-b64url",
 	}
 
 	id, err := SubmitTx(context.Background(), srv.URL, bundle, BundleTags("demo"), sig, nil)
@@ -97,6 +98,10 @@ func TestSubmitTxPostsTransactionJSON(t *testing.T) {
 	// data_size 在 Arweave 的交易 JSON 里是字符串，写成数字节点会拒
 	if got["data_size"] != "11" {
 		t.Fatalf("data_size 应为字符串 \"11\"，实际 %#v", got["data_size"])
+	}
+	// data_root 必须带上：签名算的就是它，交易里漏了就不自洽
+	if got["data_root"] != "root-b64url" {
+		t.Fatalf("data_root 应原样带上，实际 %#v", got["data_root"])
 	}
 	if got["quantity"] != "0" {
 		t.Fatalf("quantity 应为 \"0\"，实际 %#v", got["quantity"])
@@ -165,12 +170,35 @@ func TestSubmitTxRejectsOversizeBundle(t *testing.T) {
 	defer srv.Close()
 
 	big := make([]byte, BundleLimit+1)
-	sig := &TxSignature{ID: "id", Owner: "o", Signature: "s"}
+	sig := &TxSignature{ID: "id", Owner: "o", Signature: "s", DataRoot: "r"}
 	if _, err := SubmitTx(context.Background(), srv.URL, big, nil, sig, nil); err == nil {
 		t.Fatal("超大 bundle 应当报错")
 	}
 	if called {
 		t.Fatal("超限时不该发出请求")
+	}
+}
+
+// data_root 是签名内容的一部分，缺了就不能提交。
+// 之前漏了这个字段，交易 JSON 里没有它，节点会拒。
+func TestSubmitTxRejectsMissingDataRoot(t *testing.T) {
+	called := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	sig := &TxSignature{ID: "id", Owner: "o", Signature: "s"} // 故意不给 data_root
+	_, err := SubmitTx(context.Background(), srv.URL, []byte("x"), nil, sig, nil)
+	if err == nil {
+		t.Fatal("缺 data_root 应当报错")
+	}
+	if !strings.Contains(err.Error(), "data_root") {
+		t.Fatalf("错误信息应点明 data_root: %v", err)
+	}
+	if called {
+		t.Fatal("字段不全时不该发出请求")
 	}
 }
 
@@ -181,7 +209,7 @@ func TestSubmitTxReportsNodeError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	sig := &TxSignature{ID: "id", Owner: "o", Signature: "s"}
+	sig := &TxSignature{ID: "id", Owner: "o", Signature: "s", DataRoot: "r"}
 	_, err := SubmitTx(context.Background(), srv.URL, []byte("x"), nil, sig, nil)
 	if err == nil {
 		t.Fatal("节点报错时应当返回错误")

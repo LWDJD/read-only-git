@@ -131,6 +131,10 @@ func (s *Service) SignTx(ctx context.Context, data []byte, tags []arweave.Tag) (
 	if sig.ID == "" || sig.Owner == "" || sig.Signature == "" {
 		return nil, fmt.Errorf("钱包回传的交易字段不完整（缺 id / owner / signature）")
 	}
+	// data_root 同样不能缺：签名算的就是它，交易 JSON 里要用。
+	if sig.DataRoot == "" {
+		return nil, fmt.Errorf("钱包回传的交易字段不完整（缺 data_root）")
+	}
 	return &sig, nil
 }
 

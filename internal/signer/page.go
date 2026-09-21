@@ -69,6 +69,9 @@ const DefaultPage = `<!doctype html>
       signature: tx.signature,
       reward: tx.reward,
       last_tx: tx.last_tx,
+      // data_root 是签名内容的一部分，Go 侧要拿它拼交易 JSON。
+      // 交易 JSON 里漏了这个字段，签名就不再自洽，节点会拒。
+      data_root: tx.data_root,
     });
   }
 
