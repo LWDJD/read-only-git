@@ -13,3 +13,7 @@ __pycache__/
 
 # 部署产物：裸仓库由 prepare-repo 脚本生成，不进版本库
 public/*.git/
+
+# Go 构建产物
+/rog
+/rog.exe
