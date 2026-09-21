@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -18,6 +19,7 @@ import (
 	"github.com/LWDJD/read-only-git/internal/publish"
 	"github.com/LWDJD/read-only-git/internal/repopack"
 	"github.com/LWDJD/read-only-git/internal/signer"
+	"github.com/LWDJD/read-only-git/internal/webui"
 )
 
 func main() {
@@ -38,6 +40,8 @@ func run(args []string) error {
 		return cmdPack(args[1:])
 	case "publish":
 		return cmdPublish(args[1:])
+	case "webui":
+		return cmdWebui(args[1:])
 	case "help", "-h", "--help":
 		usage(os.Stdout)
 		return nil
@@ -56,6 +60,7 @@ func usage(w *os.File) {
 	fmt.Fprintln(w, "  pack [--update] <源仓库> [输出目录] [仓库名]   生成可托管的裸仓库")
 	fmt.Fprintln(w, "  publish <站点目录> [目标目录]                 发布到本地目录")
 	fmt.Fprintln(w, "  publish <站点目录> --arweave [选项]            发布到 Arweave（钱包签名）")
+	fmt.Fprintln(w, "  webui [--site <站点目录>]                    打开图形界面，功能与命令行一致")
 	fmt.Fprintln(w, "  help                                         显示本说明")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "pack 的参数:")
@@ -316,6 +321,55 @@ func cmdPublishArweave(siteDir, repo, endpoint, fromEntry, gateway string, useL1
 	fmt.Printf("v 记录写入 %s\n", statePath)
 	fmt.Println()
 	fmt.Println("下一步：把这个入口写进 ENS 的 contenthash 记录。")
+	return nil
+}
+
+// cmdWebui 起一个本机图形界面，把维护器的功能都摆出来。
+//
+// 它只是命令行之上的一层壳：所有操作都走内部同一套实现。
+// 只绑 127.0.0.1，不对外开放。
+func cmdWebui(args []string) error {
+	siteDir := "public"
+
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "-h", "--help":
+			usage(os.Stdout)
+			return nil
+		case "--site":
+			if i+1 >= len(args) {
+				return fmt.Errorf("--site 后面缺少值")
+			}
+			i++
+			siteDir = args[i]
+		default:
+			if strings.HasPrefix(args[i], "-") {
+				return fmt.Errorf("未知开关: %s", args[i])
+			}
+			siteDir = args[i]
+		}
+	}
+
+	srv := webui.New(siteDir)
+	if err := srv.Start(); err != nil {
+		return err
+	}
+	defer srv.Close()
+
+	fmt.Println("维护台已启动：")
+	fmt.Println()
+	fmt.Printf("  %s\n", srv.URL())
+	fmt.Println()
+	fmt.Printf("站点   %s\n", siteDir)
+	fmt.Println("按 Ctrl+C 退出。")
+	fmt.Println()
+
+	openBrowser(srv.URL())
+
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt)
+	<-sig
+	fmt.Println("\n已退出。")
 	return nil
 }
 
