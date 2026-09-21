@@ -265,7 +265,7 @@ export async function viewTree(app, ctx, route) {
   const ref = route.ref
   const path = route.path
 
-  const crumbs = [{ text: repoLabel(name), href: repoHref(name) }]
+  const crumbs = [{ text: repoLabel(name), href: treeHref(name, ref, '') }]
   if (path) crumbs.push({ text: path, href: treeHref(name, ref, path) })
 
   await repoPage(app, ctx, {
@@ -277,7 +277,10 @@ export async function viewTree(app, ctx, route) {
 
       return [
         breadcrumbHeader(name, ref, path),
-        fileBox({ name, ref, commit: chrome.commit, entries, path }),
+        fileBox({
+          name, ref, commit: chrome.commit, entries, path,
+          heads: chrome.heads, tags: chrome.tags,
+        }),
         docs.length ? docsPanel(chrome.repo, sha, docs) : null,
       ]
     },
@@ -294,7 +297,7 @@ export async function viewBlob(app, ctx, route) {
   await repoPage(app, ctx, {
     name, active: 'code', ref,
     crumbs: [
-      { text: repoLabel(name), href: repoHref(name) },
+      { text: repoLabel(name), href: treeHref(name, ref, '') },
       { text: path, href: blobHref(name, ref, path) },
     ],
     build: async (chrome) => {
@@ -339,7 +342,7 @@ export async function viewCommits(app, ctx, route) {
   await repoPage(app, ctx, {
     name, active: 'commits', ref,
     crumbs: [
-      { text: repoLabel(name), href: repoHref(name) },
+      { text: repoLabel(name), href: treeHref(name, ref, '') },
       { text: '提交' },
     ],
     build: async (chrome) => {
@@ -385,7 +388,7 @@ export async function viewBranches(app, ctx, route) {
   await repoPage(app, ctx, {
     name, active: 'branches',
     crumbs: [
-      { text: repoLabel(name), href: repoHref(name) },
+      { text: repoLabel(name), href: treeHref(name, '', '') },
       { text: '分支' },
     ],
     build: async (chrome) => {
@@ -440,7 +443,7 @@ export async function viewTags(app, ctx, route) {
   await repoPage(app, ctx, {
     name, active: 'tags',
     crumbs: [
-      { text: repoLabel(name), href: repoHref(name) },
+      { text: repoLabel(name), href: treeHref(name, '', '') },
       { text: '标签' },
     ],
     build: async (chrome) => {
@@ -494,10 +497,10 @@ export async function viewTags(app, ctx, route) {
 
 /* --- 片段 ---------------------------------------------------------------- */
 
-function fileBox({ name, ref, commit, entries, path = '' }) {
+function fileBox({ name, ref, commit, entries, path = '', heads = [], tags = [] }) {
   return h('div', { class: 'panel' },
     h('div', { class: 'file-toolbar' },
-      h('span', { class: 'branch-chip', text: ref }),
+      refPicker({ name, ref, heads, tags }),
       h('span', { class: 'toolbar-commit' },
         link(commitsHref(name, ref), firstLine(commit)),
         h('span', { class: 'muted', text: ` · ${shortSha(commit.sha)}` }),
@@ -611,9 +614,116 @@ function docsPanel(repo, sha, docs) {
   return h('div', { class: 'panel docs-panel' }, tabs, body)
 }
 
+/* --- ref 选择器 ---------------------------------------------------------- */
+
+// 同一时刻只开一个下拉。
+let closeCurrentRefMenu = null
+
+function closeRefMenus() {
+  if (closeCurrentRefMenu) {
+    closeCurrentRefMenu()
+    closeCurrentRefMenu = null
+  }
+}
+
+document.addEventListener('click', closeRefMenus)
+
+/**
+ * ref 选择器：按钮上显示当前 ref，点开展开可切换的分支与标签。
+ *
+ * 下拉里刻意只列分支和标签，不列提交——GitHub 也是如此。
+ * 当前 ref 具体是某个 sha 时，只体现在按钮文字上，不往下拉里塞，
+ * 免得列表混进一堆提交流。
+ */
+function refPicker({ name, ref, heads, tags }) {
+  // 当前 ref 落在哪个分组就默认展开哪个 tab：
+  // 从标签进来的人不用先手动切一下才能看到自己在哪。
+  const refIsTag = tags.some(tag => tag.name === ref)
+  const groups = [
+    { key: 'heads', label: '分支', items: heads },
+    { key: 'tags', label: '标签', items: tags },
+  ]
+  let active = refIsTag ? 'tags' : 'heads'
+
+  const list = h('div', { class: 'ref-menu-list' })
+
+  const tabButtons = groups.map(group => h('button', {
+    class: 'ref-tab',
+    type: 'button',
+    dataset: { tab: group.key },
+    text: group.label,
+  }))
+
+  function paint() {
+    for (const btn of tabButtons) {
+      btn.classList.toggle('is-active', btn.dataset.tab === active)
+    }
+    const group = groups.find(g => g.key === active)
+    if (group.items.length) {
+      mount(list, group.items.map(item => refMenuItem(name, item.name, ref)))
+    } else {
+      mount(list, h('div', { class: 'ref-menu-empty', text: `没有${group.label}` }))
+    }
+    list.scrollTop = 0
+  }
+
+  for (const btn of tabButtons) {
+    btn.addEventListener('click', (event) => {
+      event.stopPropagation()
+      active = btn.dataset.tab
+      paint()
+    })
+  }
+  paint()
+
+  const menu = h('div', { class: 'ref-menu', hidden: true },
+    h('div', { class: 'ref-tabs' }, tabButtons),
+    list,
+  )
+
+  const btn = h('button', {
+    class: 'branch-chip ref-button',
+    type: 'button',
+    'aria-haspopup': 'true',
+  }, h('span', { class: 'ref-button-label', text: ref }), h('span', { class: 'ref-caret', text: '▾' }))
+
+  const wrap = h('div', { class: 'ref-wrap' }, btn, menu)
+
+  const close = () => {
+    menu.hidden = true
+    wrap.classList.remove('is-open')
+  }
+
+  btn.addEventListener('click', (event) => {
+    event.stopPropagation()
+    const willOpen = menu.hidden
+    closeRefMenus()
+    if (willOpen) {
+      menu.hidden = false
+      wrap.classList.add('is-open')
+      closeCurrentRefMenu = close
+    }
+  })
+
+  // 点菜单内部不要冒泡到 document，否则刚开就被关掉
+  menu.addEventListener('click', (event) => event.stopPropagation())
+
+  return wrap
+}
+
+function refMenuItem(name, value, current) {
+  return h('a', {
+    class: 'ref-menu-item' + (value === current ? ' is-current' : ''),
+    href: treeHref(name, value, ''),
+    text: value,
+  })
+}
+
 function breadcrumbHeader(name, ref, path) {
   const parts = String(path || '').split('/').filter(Boolean)
-  const nodes = [link(repoHref(name), repoLabel(name))]
+  // 仓库名指向「当前 ref 的代码根」而不是概览页：
+  // 在看某个提交的快照时点它，应当留在那个提交里，而不是被拉回默认分支。
+  const nodes = [link(treeHref(name, ref, ''), repoLabel(name))]
 
   let acc = ''
   for (const part of parts) {
