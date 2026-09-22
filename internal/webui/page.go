@@ -216,7 +216,7 @@ const DefaultPage = `<!doctype html>
         <span>站点文件</span>
         <span class="muted" id="fileSummary"></span>
       </h2>
-      <p class="muted" style="margin:0 0 8px">站点里的文件按目录展示。把文件拖到某一行上替换该路径，或点右侧删除。</p>
+      <p class="muted" style="margin:0 0 8px">把文件或整个目录拖进来：拖到文件行替换该文件，拖到目录行落进该目录，拖到空白处落到站点根。重名会先问一次。</p>
       <div class="tree" id="files"></div>
     </section>
   </div>
@@ -382,11 +382,11 @@ const DefaultPage = `<!doctype html>
     act.appendChild(del);
 
     row.appendChild(name); row.appendChild(size); row.appendChild(dig); row.appendChild(act);
-    attachDrop(row);
+    attachFileDrop(row);
     return row;
   }
 
-  function dirRow(node, depth, box) {
+  function dirRow(node, dirPath, depth, box) {
     var row = document.createElement('div');
     row.className = 'trow dir';
     row.style.paddingLeft = (6 + depth * 14) + 'px';
@@ -411,7 +411,7 @@ const DefaultPage = `<!doctype html>
 
     var kids = document.createElement('div');
     kids.className = 'kids';
-    renderNode(node, depth + 1, kids);
+    renderNode(node, dirPath, depth + 1, kids);
 
     row.onclick = function () {
       var open = !kids.hidden;
@@ -419,15 +419,19 @@ const DefaultPage = `<!doctype html>
       twist.textContent = open ? '▸' : '▾';
     };
 
+    // 拖到这个目录行上，文件落在它里面
+    attachDirDrop(row, dirPath);
+
     box.appendChild(row);
     box.appendChild(kids);
   }
 
-  function renderNode(node, depth, box) {
+  function renderNode(node, dirPath, depth, box) {
     Object.keys(node.dirs).sort().forEach(function (d) {
-      dirRow(node.dirs[d], depth, box);
+      var child = node.dirs[d];
+      dirRow(child, dirPath ? dirPath + '/' + d : d, depth, box);
     });
-    node.files.sort(function (a, b) { return a.name < b.name ? -1 : 1; }).forEach(function (f) {
+    node.files.slice().sort(function (a, b) { return a.name < b.name ? -1 : 1; }).forEach(function (f) {
       box.appendChild(fileRow(f.entry, depth));
     });
   }
@@ -435,36 +439,202 @@ const DefaultPage = `<!doctype html>
   function renderFiles(files) {
     var box = el('files');
     box.textContent = '';
-    renderNode(buildTree(files), 0, box);
+
+    // 查重名要用当前磁盘上的路径，在这里更新，refresh 之后就准了
+    currentPaths = {};
+    files.forEach(function (f) { currentPaths[f.path] = true; });
+
+    renderNode(buildTree(files), '', 0, box);
   }
 
-  // 拖拽替换：读成字节，base64 后交给后端。
-  function attachDrop(tr) {
-    tr.addEventListener('dragover', function (e) {
-      e.preventDefault();
-      tr.classList.add('drop');
+  // 拖放。落点按拖到哪决定：
+  //
+  //   拖到文件行   → 替换该文件
+  //   拖到目录行   → 落到该目录下，各按自己的相对路径
+  //   拖到面板空白 → 落到站点根
+  //
+  // 重名不逐个问：拖二十个文件会弹二十次窗。收集齐之后统一问一次，
+  // 确定 = 替换这一批里的重名，取消 = 跳过它们、只写新文件。
+
+  // 当前磁盘上的路径集合，用来查重名。renderFiles 时更新。
+  var currentPaths = {};
+
+  // collectDrops 把一次拖放里的东西收成 [{rel, file}]。
+  //
+  // 走 webkitGetAsEntry：拖目录时 dataTransfer.files 是空的，
+  // 只有它能把目录递归展开。拿不到时退化成平铺的文件清单，
+  // 那种情况下没有目录结构可用，只能按文件名落位。
+  async function collectDrops(dt) {
+    var out = [];
+    var items = dt.items;
+
+    if (!items || !items.length) {
+      Array.prototype.forEach.call(dt.files || [], function (f) {
+        out.push({ rel: f.name, file: f });
+      });
+      return out;
+    }
+
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].kind !== 'file') continue;
+      var entry = items[i].webkitGetAsEntry && items[i].webkitGetAsEntry();
+      if (entry) {
+        if (entry.isDirectory) {
+          // 最外层目录的名字不保留：它叫什么由落点决定，
+          // 它内部的层级关系才是要带过去的。
+          await readDirInto(entry, '', out);
+        } else {
+          await walkEntry(entry, '', out);
+        }
+      } else if (items[i].getAsFile) {
+        var f = items[i].getAsFile();
+        if (f) await walkEntry(null, f.name, out, f);
+      }
+    }
+    return out;
+  }
+
+  // readDirInto 把一个目录的内容读进来，prefix 是这些内容对应的相对路径前缀。
+  async function readDirInto(dir, prefix, out) {
+    var reader = dir.createReader();
+    // readEntries 一次只给一批，要反复读到空为止
+    for (;;) {
+      var batch = await new Promise(function (res, rej) { reader.readEntries(res, rej); });
+      if (!batch.length) break;
+      for (var i = 0; i < batch.length; i++) {
+        await walkEntry(batch[i], prefix, out);
+      }
+    }
+  }
+
+  // walkEntry 处理拖入内容里的一个条目。
+  //
+  // prefix 是它所在层级的路径前缀（不含自己的名字），
+  // 自己的名字在这里拼，往上只能拼一次。
+  async function walkEntry(entry, prefix, out, plainFile) {
+    if (!entry) {
+      if (plainFile) out.push({ rel: prefix, file: plainFile });
+      return;
+    }
+    if (entry.isFile) {
+      var f = await new Promise(function (res, rej) { entry.file(res, rej); });
+      out.push({ rel: prefix ? prefix + '/' + f.name : f.name, file: f });
+      return;
+    }
+    if (!entry.isDirectory) return;
+
+    // 内层目录的名字要并进前缀，供它里面的文件使用
+    await readDirInto(entry, prefix ? prefix + '/' + entry.name : entry.name, out);
+  }
+
+  // readAsB64 把文件读成 base64。
+  //
+  // 分块拼接，避免一次性 apply 超长数组把调用栈撑爆（大文件真的会）。
+  async function readAsB64(file) {
+    var buf = await file.arrayBuffer();
+    var bytes = new Uint8Array(buf);
+    var bin = '';
+    var CHUNK = 0x8000;
+    for (var i = 0; i < bytes.length; i += CHUNK) {
+      bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+    }
+    return btoa(bin);
+  }
+
+  // dropInto 处理一次拖放。base 是落点的目录前缀，空串表示站点根。
+  async function dropInto(base, dt) {
+    var items = await collectDrops(dt);
+    if (!items.length) return;
+
+    var planned = items.map(function (it) {
+      return { path: base ? base + '/' + it.rel : it.rel, file: it.file };
     });
-    tr.addEventListener('dragleave', function () { tr.classList.remove('drop'); });
-    tr.addEventListener('drop', async function (e) {
+
+    var clashes = planned.filter(function (p) { return currentPaths[p.path]; });
+    var overwrite = true;
+    if (clashes.length) {
+      var sample = clashes.slice(0, 3).map(function (p) { return p.path; }).join('、');
+      var more = clashes.length > 3 ? ' 等 ' + clashes.length + ' 个' : '';
+      overwrite = confirm(
+        '有 ' + clashes.length + ' 个路径已存在：' + sample + more + '\n\n' +
+        '确定 = 替换它们；取消 = 跳过它们，只写新文件。'
+      );
+    }
+
+    var files = [];
+    for (var i = 0; i < planned.length; i++) {
+      var p = planned[i];
+      if (clashes.length && !overwrite && currentPaths[p.path]) continue;
+      files.push({ path: p.path, bytes: await readAsB64(p.file) });
+    }
+    if (!files.length) { log('全部跳过，没有写入', 'warn'); return; }
+    if (files.length > 100) { log('一批写了 ' + files.length + ' 个文件，可能要等一会'); }
+
+    var res = await api('/api/files/replace', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ site: site, files: files }),
+    });
+    var out = await res.json();
+    if (!res.ok) { log('写入失败：' + (out.error || res.status), 'err'); return; }
+
+    // 逐个报结果：一批里部分失败时，不能只说「写完了」
+    var ok = 0, bad = [];
+    (out.results || []).forEach(function (r) {
+      if (r.error) bad.push(r.path + '（' + r.error + '）');
+      else ok++;
+    });
+    if (ok) log('已写入 ' + ok + ' 个文件', 'ok');
+    if (bad.length) log('有 ' + bad.length + ' 个没写成：\n  ' + bad.join('\n  '), 'err');
+    refresh();
+  }
+
+  // attachFileDrop：拖到某一行上，替换那一行的文件。
+  function attachFileDrop(row) {
+    row.addEventListener('dragover', function (e) {
       e.preventDefault();
-      tr.classList.remove('drop');
-      var file = e.dataTransfer.files && e.dataTransfer.files[0];
-      if (!file) return;
+      row.classList.add('drop');
+    });
+    row.addEventListener('dragleave', function () { row.classList.remove('drop'); });
+    row.addEventListener('drop', async function (e) {
+      e.preventDefault();
+      e.stopPropagation();
+      row.classList.remove('drop');
 
-      var buf = await file.arrayBuffer();
-      var bytes = new Uint8Array(buf);
-      var bin = '';
-      for (var i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+      var items = await collectDrops(e.dataTransfer);
+      if (!items.length) return;
+      if (items.length > 1) {
+        log('拖到了文件行上，只取第一个：' + items[0].rel, 'warn');
+      }
 
+      var b64 = await readAsB64(items[0].file);
       var res = await api('/api/files/replace', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ site: site, path: tr.dataset.path, bytes: btoa(bin) }),
+        body: JSON.stringify({ site: site, files: [{ path: row.dataset.path, bytes: b64 }] }),
       });
       var out = await res.json();
       if (!res.ok) { log('替换失败：' + (out.error || res.status), 'err'); return; }
-      log('已替换 ' + tr.dataset.path + '（' + fmtSize(out.size) + '）', 'ok');
+      var r = (out.results || [])[0] || {};
+      if (r.error) { log('替换失败：' + r.error, 'err'); return; }
+      log('已替换 ' + row.dataset.path + '（' + fmtSize(r.size || 0) + '）', 'ok');
       refresh();
+    });
+  }
+
+  // attachDirDrop：拖到目录行（或面板空白）上，文件落到那个目录里。
+  function attachDirDrop(row, base) {
+    row.addEventListener('dragover', function (e) {
+      e.preventDefault();
+      e.stopPropagation();
+      row.classList.add('drop');
+    });
+    row.addEventListener('dragleave', function () { row.classList.remove('drop'); });
+    row.addEventListener('drop', function (e) {
+      e.preventDefault();
+      e.stopPropagation();
+      row.classList.remove('drop');
+      dropInto(base, e.dataTransfer);
     });
   }
 
@@ -525,6 +695,13 @@ const DefaultPage = `<!doctype html>
   }
 
   el('refresh').onclick = refresh;
+
+  // 文件树本身就是兜底的拖放区：拖到空白处（不是某一行）就落到站点根
+  attachDirDrop(el('files'), '');
+
+  // 拖到页面别处时，浏览器默认会直接打开这个文件。一律拦掉。
+  document.addEventListener('dragover', function (e) { e.preventDefault(); });
+  document.addEventListener('drop', function (e) { e.preventDefault(); });
 
   Array.prototype.forEach.call(el('targetTabs').children, function (btn) {
     btn.onclick = function () {

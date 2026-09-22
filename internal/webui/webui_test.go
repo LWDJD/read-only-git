@@ -202,9 +202,10 @@ func TestReplaceThenStateShowsNewDigest(t *testing.T) {
 	getJSON(t, srv.baseURL()+"api/state", &before)
 
 	code, _ := postJSON(t, srv.baseURL()+"api/files/replace", map[string]any{
-		"site":  site,
-		"path":  "a.txt",
-		"bytes": base64.StdEncoding.EncodeToString([]byte("brand new content")),
+		"site": site,
+		"files": []map[string]any{
+			{"path": "a.txt", "bytes": b64("brand new content")},
+		},
 	})
 	if code != http.StatusOK {
 		t.Fatalf("替换应当成功，实际 %d", code)
@@ -225,19 +226,78 @@ func TestReplaceThenStateShowsNewDigest(t *testing.T) {
 	}
 }
 
-func TestReplaceRejectsEscape(t *testing.T) {
+// 一次请求写多个文件：界面拖入一批文件或整个目录时走这条。
+//
+// 顺带确认目录会被按需建出来：拖进来的目录结构不必先在磁盘上存在。
+func TestReplaceWritesManyFilesAndMakesDirs(t *testing.T) {
 	site := t.TempDir()
 	srv := newTestServer(t, site)
 
 	code, out := postJSON(t, srv.baseURL()+"api/files/replace", map[string]any{
-		"site":  site,
-		"path":  "../evil.txt",
-		"bytes": base64.StdEncoding.EncodeToString([]byte("x")),
+		"site": site,
+		"files": []map[string]any{
+			{"path": "one.txt", "bytes": b64("1")},
+			{"path": "deep/two.txt", "bytes": b64("22")},
+			{"path": "deep/deeper/three.txt", "bytes": b64("333")},
+		},
 	})
-	if code != http.StatusBadRequest {
-		t.Fatalf("越界路径应当被拒，实际 %d %+v", code, out)
+	if code != http.StatusOK {
+		t.Fatalf("批量写入应当成功，实际 %d %+v", code, out)
+	}
+
+	for rel, want := range map[string]string{
+		"one.txt":               "1",
+		"deep/two.txt":          "22",
+		"deep/deeper/three.txt": "333",
+	} {
+		got, err := os.ReadFile(filepath.Join(site, filepath.FromSlash(rel)))
+		if err != nil {
+			t.Fatalf("%s 没被写出来: %v", rel, err)
+		}
+		if string(got) != want {
+			t.Fatalf("%s 内容不对: %q", rel, got)
+		}
 	}
 }
+
+// 越界的路径不写，但同一批里其余文件照写。
+//
+// 批量接口逐个报告结果，不能因为一条坏请求把整批丢掉：
+// 拖进来二十个文件，其中一个名字越界，其余十九个不该跟着白干。
+func TestReplaceRejectsEscapeButWritesRest(t *testing.T) {
+	site := t.TempDir()
+	srv := newTestServer(t, site)
+
+	code, out := postJSON(t, srv.baseURL()+"api/files/replace", map[string]any{
+		"site": site,
+		"files": []map[string]any{
+			{"path": "../evil.txt", "bytes": b64("x")},
+			{"path": "good.txt", "bytes": b64("ok")},
+		},
+	})
+	if code != http.StatusOK {
+		t.Fatalf("批量接口应当整体返回 200，实际 %d %+v", code, out)
+	}
+
+	results, _ := out["results"].([]any)
+	if len(results) != 2 {
+		t.Fatalf("应当逐个报告结果，实际 %+v", out)
+	}
+	first, _ := results[0].(map[string]any)
+	if msg, _ := first["error"].(string); msg == "" {
+		t.Fatalf("越界那条应当带上错误，实际 %+v", first)
+	}
+
+	if _, err := os.Stat(filepath.Join(filepath.Dir(site), "evil.txt")); err == nil {
+		t.Fatal("越界路径不该被写出去")
+	}
+	if got, err := os.ReadFile(filepath.Join(site, "good.txt")); err != nil || string(got) != "ok" {
+		t.Fatalf("同一批里合法的文件应当照写，实际 %q %v", got, err)
+	}
+}
+
+// b64 把一小段文本编成接口要的 base64。
+func b64(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
 
 func TestDeleteFile(t *testing.T) {
 	site := t.TempDir()

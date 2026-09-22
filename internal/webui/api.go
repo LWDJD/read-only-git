@@ -585,37 +585,61 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 
 // ---------- 文件 ----------
 
-type replaceRequest struct {
-	Site  string `json:"site"`
+type replaceFile struct {
 	Path  string `json:"path"`
 	Bytes []byte `json:"bytes"` // JSON 里是 base64
 }
 
+type replaceRequest struct {
+	Site  string        `json:"site"`
+	Files []replaceFile `json:"files"`
+}
+
+type replaceResult struct {
+	Path  string `json:"path"`
+	Size  int    `json:"size,omitempty"`
+	Error string `json:"error,omitempty"`
+}
+
+// handleFileReplace 批量写入文件。
+//
+// 界面一次可能拖进来多个文件与整个目录，逐个发请求既慢又要处理半途失败，
+// 所以一次收全。「重名该覆盖还是跳过」在界面侧已经问过用户了，这里只管写。
+//
+// 一个文件写失败不影响其余：每个都单独报告结果，前端照实显示。
 func (s *Server) handleFileReplace(w http.ResponseWriter, r *http.Request) {
 	var req replaceRequest
 	if !decodeBody(w, r, &req) {
 		return
 	}
 	site := siteOf(s, req.Site)
+	if len(req.Files) == 0 {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("没有要写入的文件"))
+		return
+	}
 
-	full, err := safeJoin(site, req.Path)
+	results := make([]replaceResult, 0, len(req.Files))
+	for _, f := range req.Files {
+		if err := s.writeSiteFile(site, f.Path, f.Bytes); err != nil {
+			results = append(results, replaceResult{Path: f.Path, Error: err.Error()})
+			continue
+		}
+		results = append(results, replaceResult{Path: f.Path, Size: len(f.Bytes)})
+	}
+
+	writeJSON(w, map[string]any{"ok": true, "results": results})
+}
+
+// writeSiteFile 写一个站点内的文件，路径越界一律拒绝。
+func (s *Server) writeSiteFile(site, rel string, data []byte) error {
+	full, err := safeJoin(site, rel)
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, err)
-		return
+		return err
 	}
-
 	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
-		writeErr(w, http.StatusInternalServerError, err)
-		return
+		return err
 	}
-	if err := os.WriteFile(full, req.Bytes, 0o644); err != nil {
-		writeErr(w, http.StatusInternalServerError, err)
-		return
-	}
-
-	// 写完就结束，什么都不记。后续的打包与发布自己会重新扫描、重算摘要，
-	// 所以绕过界面直接改目录同样能被正确识别。
-	writeJSON(w, map[string]any{"ok": true, "path": req.Path, "size": len(req.Bytes)})
+	return os.WriteFile(full, data, 0o644)
 }
 
 type deleteRequest struct {
