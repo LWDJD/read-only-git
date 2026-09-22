@@ -561,6 +561,39 @@ func TestRepoNameFor(t *testing.T) {
 	}
 }
 
+// 站点文件按目录展示：页面里应当是一个树形容器，不再是一张平铺的表。
+//
+// 这是纯前端改动（后端返回的仍是扁平清单），所以只能从页面源码这一侧卡：
+// 树容器在、聚合函数在、原来那张表的 tbody 不在。
+func TestPageRendersFileTree(t *testing.T) {
+	srv := newTestServer(t, t.TempDir())
+
+	req, err := http.NewRequest(http.MethodGet, srv.baseURL(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Rog-Token", testToken)
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+
+	page, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(page, []byte(`class="tree" id="files"`)) {
+		t.Fatal("应当有一个树形容器承载文件列表")
+	}
+	if !bytes.Contains(page, []byte("function buildTree(")) {
+		t.Fatal("应当在页面侧把扁平清单聚成树")
+	}
+	if bytes.Contains(page, []byte(`<tbody id="files"`)) {
+		t.Fatal("平铺的表格不该还在")
+	}
+}
+
 // 发布面板的完整闭环：点一次发布，产物落到目标目录，记录也写进站点。
 //
 // 走 local 目标：不碰网络也不碰钱包，但会把「扫描站点 → 逐个文件写出 →

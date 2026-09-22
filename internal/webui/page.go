@@ -108,6 +108,24 @@ const DefaultPage = `<!doctype html>
   th, td { text-align: left; padding: 5px 6px; border-bottom: 1px solid var(--border-soft); }
   th { font-size: 12px; color: var(--muted); font-weight: 600; border-bottom-color: var(--border); }
   td.mono, .mono { font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+
+  /* 文件树。缩进用 padding-left 表达层级，每层 14px。
+     目录行可点收起；文件行是拖拽的落点。 */
+  .tree { font-size: 13px; border-top: 1px solid var(--border); }
+  .trow {
+    display: flex; align-items: center; gap: 6px; padding: 3px 6px;
+    border-bottom: 1px solid var(--border-soft);
+  }
+  .trow.dir { cursor: pointer; user-select: none; }
+  .trow.dir:hover { background: var(--chip); }
+  .twist { width: 10px; color: var(--muted); font-size: 10px; }
+  .tname { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tname.dirname { font-weight: 600; }
+  .tsize { width: 74px; text-align: right; color: var(--muted); font-size: 12px; }
+  .tdigest { width: 78px; color: var(--muted); font-family: ui-monospace, Consolas, monospace; font-size: 11px; }
+  .tact { width: 56px; text-align: right; }
+  .tact button { margin: 0; padding: 2px 8px; font-size: 12px; }
+  .kids { }
   tr.drop { background: var(--chip); }
   .chip {
     display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 10px;
@@ -198,11 +216,8 @@ const DefaultPage = `<!doctype html>
         <span>站点文件</span>
         <span class="muted" id="fileSummary"></span>
       </h2>
-      <p class="muted" style="margin:0 0 8px">把文件拖到下面任意一行上，即可替换该路径的内容。</p>
-      <table>
-        <thead><tr><th>路径</th><th style="width:90px">大小</th><th style="width:110px">sha256</th><th style="width:120px"></th></tr></thead>
-        <tbody id="files"></tbody>
-      </table>
+      <p class="muted" style="margin:0 0 8px">站点里的文件按目录展示。把文件拖到某一行上替换该路径，或点右侧删除。</p>
+      <div class="tree" id="files"></div>
     </section>
   </div>
 </main>
@@ -293,34 +308,7 @@ const DefaultPage = `<!doctype html>
       log(st.error, 'err');
     }
 
-    var tb = el('files');
-    tb.textContent = '';
-    (st.files || []).forEach(function (f) {
-      var tr = document.createElement('tr');
-      tr.dataset.path = f.path;
-
-      var td1 = document.createElement('td');
-      td1.className = 'mono';
-      td1.textContent = f.path;
-
-      var td2 = document.createElement('td');
-      td2.textContent = fmtSize(f.size);
-
-      var td3 = document.createElement('td');
-      td3.className = 'mono';
-      td3.textContent = (f.digest || '').slice(0, 8);
-
-      var td4 = document.createElement('td');
-      var del = document.createElement('button');
-      del.textContent = '删除';
-      del.style.marginTop = '0';
-      del.onclick = function () { removeFile(f.path); };
-      td4.appendChild(del);
-
-      tr.appendChild(td1); tr.appendChild(td2); tr.appendChild(td3); tr.appendChild(td4);
-      attachDrop(tr);
-      tb.appendChild(tr);
-    });
+    renderFiles(st.files || []);
     el('fileSummary').textContent = (st.files || []).length + ' 个文件 · ' + fmtSize(st.totalSize || 0);
 
     var rb = el('records');
@@ -334,6 +322,120 @@ const DefaultPage = `<!doctype html>
       });
       rb.appendChild(tr);
     });
+  }
+
+  // 把扁平的路径清单聚成树。
+  //
+  // 后端给的是一条条 path，层级是纯展示需求，所以在这一层聚合，
+  // 不去动后端那份「发布要用的原始数据」。
+  function buildTree(files) {
+    var root = { dirs: {}, files: [] };
+    files.forEach(function (f) {
+      var parts = f.path.split('/');
+      var node = root;
+      for (var i = 0; i < parts.length - 1; i++) {
+        var d = parts[i];
+        if (!node.dirs[d]) node.dirs[d] = { name: d, dirs: {}, files: [] };
+        node = node.dirs[d];
+      }
+      node.files.push({ name: parts[parts.length - 1], entry: f });
+    });
+    return root;
+  }
+
+  function countFiles(node) {
+    var n = node.files.length;
+    Object.keys(node.dirs).forEach(function (d) { n += countFiles(node.dirs[d]); });
+    return n;
+  }
+
+  function sumSize(node) {
+    var n = 0;
+    node.files.forEach(function (f) { n += f.entry.size; });
+    Object.keys(node.dirs).forEach(function (d) { n += sumSize(node.dirs[d]); });
+    return n;
+  }
+
+  function fileRow(entry, depth) {
+    var row = document.createElement('div');
+    row.className = 'trow';
+    row.dataset.path = entry.path;
+    row.style.paddingLeft = (6 + depth * 14) + 'px';
+
+    var name = document.createElement('span');
+    name.className = 'tname mono';
+    name.textContent = entry.path.split('/').pop();
+
+    var size = document.createElement('span');
+    size.className = 'tsize';
+    size.textContent = fmtSize(entry.size);
+
+    var dig = document.createElement('span');
+    dig.className = 'tdigest';
+    dig.textContent = (entry.digest || '').slice(0, 8);
+
+    var act = document.createElement('span');
+    act.className = 'tact';
+    var del = document.createElement('button');
+    del.textContent = '删除';
+    del.onclick = function (e) { e.stopPropagation(); removeFile(entry.path); };
+    act.appendChild(del);
+
+    row.appendChild(name); row.appendChild(size); row.appendChild(dig); row.appendChild(act);
+    attachDrop(row);
+    return row;
+  }
+
+  function dirRow(node, depth, box) {
+    var row = document.createElement('div');
+    row.className = 'trow dir';
+    row.style.paddingLeft = (6 + depth * 14) + 'px';
+
+    var twist = document.createElement('span');
+    twist.className = 'twist';
+    twist.textContent = '▾';
+
+    var name = document.createElement('span');
+    name.className = 'tname dirname';
+    name.textContent = node.name + '/';
+
+    var size = document.createElement('span');
+    size.className = 'tsize';
+    size.textContent = fmtSize(sumSize(node));
+
+    var count = document.createElement('span');
+    count.className = 'tdigest';
+    count.textContent = countFiles(node) + ' 个';
+
+    row.appendChild(twist); row.appendChild(name); row.appendChild(size); row.appendChild(count);
+
+    var kids = document.createElement('div');
+    kids.className = 'kids';
+    renderNode(node, depth + 1, kids);
+
+    row.onclick = function () {
+      var open = !kids.hidden;
+      kids.hidden = open;
+      twist.textContent = open ? '▸' : '▾';
+    };
+
+    box.appendChild(row);
+    box.appendChild(kids);
+  }
+
+  function renderNode(node, depth, box) {
+    Object.keys(node.dirs).sort().forEach(function (d) {
+      dirRow(node.dirs[d], depth, box);
+    });
+    node.files.sort(function (a, b) { return a.name < b.name ? -1 : 1; }).forEach(function (f) {
+      box.appendChild(fileRow(f.entry, depth));
+    });
+  }
+
+  function renderFiles(files) {
+    var box = el('files');
+    box.textContent = '';
+    renderNode(buildTree(files), 0, box);
   }
 
   // 拖拽替换：读成字节，base64 后交给后端。
