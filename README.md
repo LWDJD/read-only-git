@@ -30,6 +30,8 @@ objects/pack/*.idx
 └── p2ping.git/         裸仓库，一个项目一个
 ```
 
+这个结构由 `rog site init`（前端）与 `rog pack`（裸仓库与清单）各自写一部分，合起来就是一个能直接部署的站点。
+
 `repository.json` 存在的原因：静态托管没有目录列表 API，无从得知站上放了哪些仓库。
 
 ```json
@@ -51,6 +53,28 @@ objects/pack/*.idx
 前端对 JSON 里的两种写法都做了归一化，但请按裸名写。空、`.`、`..`、含路径分隔符的条目会被忽略。
 
 ## 用法
+
+### 铺开站点骨架
+
+```
+rog site init [目录] [--template <id>] [--force]
+rog site list
+```
+
+| 选项 | 默认 | 说明 |
+|---|---|---|
+| `[目录]` | `public` | 站点根目录 |
+| `--template <id>` | `default` | 用哪套模板，`rog site list` 看有哪些 |
+| `--force` | 关 | 覆盖已存在的文件；默认只补缺失的 |
+
+前端文件是嵌在二进制里的，所以**光一个 `rog` 就能把站点从零立起来**：
+
+```bash
+rog site init site          # 铺前端
+rog pack . site demo        # 写仓库
+```
+
+不传 `--force` 时它不会碰已经存在的文件：站点里的 `index.html` 可能被你改过，默认不该被模板盖掉。
 
 ### 打包
 
@@ -91,7 +115,7 @@ rog pack --update ../p2ping site p2ping
 
 #### 输出目录要指向站点根
 
-`pack` 只生成裸仓库和 `repository.json`，不碰前端。所以输出目录得是**放着 `index.html` 的那个目录**，否则产物没法直接部署：
+`pack` 只生成裸仓库和 `repository.json`，不碰前端。所以输出目录得是**放着 `index.html` 的那个目录**，否则产物没法直接部署。用 `rog site init` 就能把这个目录先铺出来：
 
 ```
 你的项目/
@@ -232,7 +256,7 @@ rog webui [--site <站点目录>] [--port <端口>]
 
 ### 换肤
 
-可调项都收在 `public/src/style.css` 顶部的 CSS 变量里：
+可调项都收在 `internal/sitekit/site/src/style.css` 顶部的 CSS 变量里：
 
 ```css
 :root {
@@ -248,7 +272,7 @@ rog webui [--site <站点目录>] [--port <端口>]
 }
 ```
 
-深色模式跟随系统，也可以用 `<html data-theme="dark">` 强制。改结构或文案动 `public/src/views.js`。
+深色模式跟随系统，也可以用 `<html data-theme="dark">` 强制。改结构或文案动 `internal/sitekit/site/src/views.js`。
 
 ## 技术说明
 
@@ -289,6 +313,15 @@ node scripts/selftest.mjs <裸仓库目录>     # 或指定一个现成的
 
 它会走一遍 pack 加载、refs 解析、tree 递归、blob 解压、提交历史。
 
+### 界面代码放哪
+
+前端骨架的真身在 `internal/sitekit/site/`，`go:embed` 把它嵌进二进制。
+选这个位置是被约束逼出来的：`go:embed` 只能嵌本包目录下的文件，
+而复制一份进包会让两份代码长期漂移。
+
+`public/` 是**产物目录**：骨架、裸仓库、清单都由工具生成，不进版本库。
+要看效果就跑 `rog site init` 铺一份出来。
+
 ## 已知限制
 
 - **只读**。协议层面没有 push 路径，这正是它能用纯静态文件托管的原因
@@ -302,26 +335,28 @@ node scripts/selftest.mjs <裸仓库目录>     # 或指定一个现成的
 ## 目录
 
 ```
-main.go                    命令行入口：pack / publish / webui
+main.go                    命令行入口：site / pack / publish / webui
 internal/repopack/         打包：全量、增量、ref 对齐、文件锁
 internal/publish/          发布抽象、本地目标、发布记录、进程内互斥
 internal/arweave/          Turbo 与 L1 两条路：上传、bundle、分块、manifest
 internal/signer/           本机签名服务与内嵌签名页（含 arweave-js）
 internal/webui/            维护台：任务、接口、内嵌页面
-public/                    部署根，整个上传
-  index.html               入口
-  repository.json          仓库清单（由 pack 维护）
-  src/
-    main.js                启动与路由分发
-    router.js              hash 路由
-    store.js               repository.json 与仓库缓存
-    views.js               各视图渲染
-    ui.js                  DOM 构造与小工具
-    markdown.js            极简 Markdown 渲染（已做 HTML 转义）
-    style.css              主题层
-    git/                   只读 git 解析器
+internal/sitekit/          嵌在二进制里的前端骨架
+  site/                    骨架真身，改前端就在这里
+    index.html             入口
+    repository.json        空清单，pack 会覆盖成真的
+    src/
+      main.js              启动与路由分发
+      router.js            hash 路由
+      store.js             repository.json 与仓库缓存
+      views.js             各视图渲染
+      ui.js                DOM 构造与小工具
+      markdown.js          极简 Markdown 渲染（已做 HTML 转义）
+      style.css            主题层
+      git/                 只读 git 解析器
+public/                    部署根（产物目录，由工具生成）
 scripts/                   不参与部署
-  serve.mjs                本地静态服务器
+  serve.mjs                本地静态服务器，默认服务骨架真身
   selftest.mjs             解析器自测
   arjs-vectors.cjs         生成分块对拍的对照数据
 ```
@@ -334,4 +369,6 @@ go build -o rog .
 
 没有第三方依赖，用一个标准库足够。改前端不用构建：`public/` 直接就是产物。
 
-改外观只动 `public/src/style.css`，改结构或文案动 `public/src/views.js`。
+改外观只动 `internal/sitekit/site/src/style.css`，改结构或文案动 `internal/sitekit/site/src/views.js`。
+
+骨架变更后，已经在用的站点用 `rog site init <站点> --force` 刷新（会覆盖同名文件）。
