@@ -67,7 +67,12 @@ function safeDecode(s) {
   try { return decodeURIComponent(s) } catch { return s }
 }
 
-/** 把仓库名 + 视图拼成可直接粘给 git 的克隆地址 */
+/**
+ * 把仓库名拼成可直接粘给 git 的克隆地址。
+ *
+ * 不带 .git 后缀，与站点上的目录名一致；git 不要求后缀，
+ * 而带后缀的路径会被某些网关拦掉。
+ */
 export function cloneUrl(repoName) {
-  return new URL(`${stripGitSuffix(repoName)}.git`, document.baseURI).href
+  return new URL(stripGitSuffix(repoName), document.baseURI).href
 }

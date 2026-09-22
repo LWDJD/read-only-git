@@ -78,7 +78,7 @@ func usage(w *os.File) {
 	fmt.Fprintln(w, "  --update   目标已存在时做增量更新，保留旧 pack；默认全量重建")
 	fmt.Fprintln(w, "  <源仓库>   必填。本地路径（普通或裸仓库），或远端地址")
 	fmt.Fprintln(w, "  [输出目录] 默认 ./public，站点根目录")
-	fmt.Fprintln(w, "  [仓库名]   默认从源推导，带不带 .git 后缀等价")
+	fmt.Fprintln(w, "  [仓库名]   默认从源推导；写成带 .git 的也会被归一化掉")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "publish 的选项:")
 	fmt.Fprintln(w, "  --arweave          发布到 Arweave，会起本地签名页等钱包签名")
@@ -558,7 +558,7 @@ func cmdPack(args []string) error {
 		if info, err := os.Stat(filepath.Join(res.Target, rel)); err == nil {
 			size = info.Size()
 		}
-		fmt.Printf("   %10s  %s/%s\n", humanSize(size), res.Name+".git", filepath.ToSlash(rel))
+		fmt.Printf("   %10s  %s/%s\n", humanSize(size), res.Name, filepath.ToSlash(rel))
 	}
 
 	fmt.Println()
@@ -567,7 +567,7 @@ func cmdPack(args []string) error {
 	fmt.Printf("v 已写入 %s\n", filepath.Join(outRoot, "repository.json"))
 	fmt.Printf("v 完成。默认分支 %s，链路 %s，可直接部署 %s\n", res.Branch, res.Via, outRoot)
 	fmt.Println()
-	fmt.Printf("  git clone <你的站点>/%s.git\n", res.Name)
+	fmt.Printf("  git clone <你的站点>/%s\n", res.Name)
 
 	if !fileExists(filepath.Join(outRoot, "index.html")) {
 		fmt.Println()

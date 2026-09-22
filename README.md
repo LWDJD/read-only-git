@@ -27,11 +27,10 @@ objects/pack/*.idx
 ├── index.html          界面
 ├── repository.json     仓库清单
 ├── src/                界面代码与样式
-└── p2ping.git/         裸仓库，一个项目一个
+└── p2ping/             裸仓库，一个项目一个（目录名就是仓库名）
 ```
 
 这个结构由 `rog site init`（前端）与 `rog pack`（裸仓库与清单）各自写一部分，合起来就是一个能直接部署的站点。
-
 `repository.json` 存在的原因：静态托管没有目录列表 API，无从得知站上放了哪些仓库。
 
 ```json
@@ -42,15 +41,21 @@ objects/pack/*.idx
 }
 ```
 
-命名约定：`.git` 是目录后缀，不是仓库名的一部分。
+命名约定：目录名就是仓库名，**不带 `.git` 后缀**。
 
 | 位置 | 形式 | 例子 |
 |---|---|---|
-| 磁盘目录 | 带后缀 | `p2ping.git/` |
+| 磁盘目录 | 裸名 | `p2ping/` |
 | `repository.json` / URL / 界面显示 | 裸名 | `p2ping` |
-| clone 地址 | 带后缀 | `<站点>/p2ping.git` |
+| clone 地址 | 裸名 | `<站点>/p2ping` |
 
-前端对 JSON 里的两种写法都做了归一化，但请按裸名写。空、`.`、`..`、含路径分隔符的条目会被忽略。
+为什么不用 `p2ping.git` 这种惯用名：git 对 URL 后缀没有任何要求，
+dumb 协议下客户端只往 base URL 后面拼 `info/refs`、`objects/info/packs`
+这些固定路径（见 git 的 `http.c`），目录叫什么都能 clone。
+而带 `.git` 的路径会被一些网关拦掉，`eth.limo` 就是一例。
+既然两种写法等价，就用不会被拦的那种。
+
+前端对带后缀的写法也做了归一化，但请按裸名写。空、`.`、`..`、含路径分隔符的条目会被忽略。
 
 ## 用法
 
@@ -130,7 +135,7 @@ rog pack --update ../p2ping site p2ping
 
 #### 它做的事
 
-裸仓库输出到 `<输出目录>/<仓库名>.git/` → `repack -a -d` 把对象收进单 pack → `gc --prune=now` → `update-server-info` 生成索引 → 清掉协议用不到的文件 → 校验并打印清单 → 更新 `repository.json`。
+裸仓库输出到 `<输出目录>/<仓库名>/` → `repack -a -d` 把对象收进单 pack → `gc --prune=now` → `update-server-info` 生成索引 → 清掉协议用不到的文件 → 校验并打印清单 → 更新 `repository.json`。
 
 重复执行安全：同名仓库覆盖重建，`repository.json` 里那条的 `description` 会保留。增量模式下旧 pack 保持不动，只把新对象追加进去，refs 对齐到源仓库。
 
@@ -329,7 +334,7 @@ node scripts/selftest.mjs <裸仓库目录>     # 或指定一个现成的
 - **整包下载**。packfile 一次性载入内存，几十 MB 会卡。要优化得解析 `.idx` 后按 Range 惰性取对象
 - **不支持 shallow clone**。`--depth` 依赖服务端裁剪历史
 - **不能选择性公开**。`info/refs` 列出仓库里所有 refs，不想公开的分支要在打包前清掉
-- **平台可能拦 `.git` 路径**。带 WAF 的托管会挡 `/.git/` 前缀，部署后先 curl 一下 `xxx.git/info/refs` 确认。被拦就把目录改名成 `xxx.repo` 之类，clone 地址相应变化（git 不要求 URL 以 `.git` 结尾）
+- **目录名不带 `.git`**，这是刻意的。git 对 URL 后缀没有要求，而带 `.git` 的路径会被一些网关拦掉（`eth.limo` 就是一例）。产物目录直接用仓库名，`git clone <站点>/demo` 即可。
 - **ENS contenthash 要手动填**。发完在 ENS 应用里把入口写成 `ar://<入口id>`，这一步尚未自动化
 
 ## 目录
