@@ -296,6 +296,37 @@ func TestReplaceRejectsEscapeButWritesRest(t *testing.T) {
 	}
 }
 
+// 失败后要能原样重试：页面得记住上一次的请求，并给一个按钮。
+//
+// 重试放在前端而不在后端：发布失败时后端已经写下了部分完成的记录，
+// 重新发一次同一个请求，记录机制会跳过已上链的文件，
+// 既不会重复付费，也不需要在后端另做一套「从断点继续」。
+func TestPageOffersRetry(t *testing.T) {
+	srv := newTestServer(t, t.TempDir())
+
+	req, err := http.NewRequest(http.MethodGet, srv.baseURL(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Rog-Token", testToken)
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+
+	page, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(page, []byte("function offerRetry(")) {
+		t.Fatal("失败后应当给出重试按钮")
+	}
+	if !bytes.Contains(page, []byte("var lastTask = null")) {
+		t.Fatal("应当记住上一次的请求参数")
+	}
+}
+
 // b64 把一小段文本编成接口要的 base64。
 func b64(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
 

@@ -659,10 +659,35 @@ const DefaultPage = `<!doctype html>
     refresh();
   }
 
+  // 最近一次发起的任务参数。失败后「重试」就是拿它原样再发一次。
+  //
+  // 不从输入框重新收集：重试的语义是「刚才那一次再来一遍」，
+  // 用户中途改过的输入不该混进来。要换参数就重新点那个按钮。
+  var lastTask = null;
+
+  // offerRetry 失败后给一个重试按钮。
+  //
+  // 不自动重试：失败原因分两类，网络抖动值得再试，
+  // 「站点里没有文件」这类再试多少次都一样。让用户自己判断。
+  function offerRetry() {
+    if (!lastTask) return;
+    var btn = document.createElement('button');
+    btn.className = 'retry';
+    btn.textContent = '重试';
+    btn.onclick = function () {
+      if (!lastTask) return;
+      // 清掉旧的按钮，免得连点之后堆一列
+      Array.prototype.forEach.call(el('logs').querySelectorAll('button.retry'), function (b) { b.remove(); });
+      runTask(lastTask.url, lastTask.body, lastTask.label);
+    };
+    el('logs').appendChild(btn);
+  }
+
   // 所有耗时操作都走这里：先拿 taskId，再订阅 SSE 看进度。
   async function runTask(url, body, label) {
     clearLog();
     log('> ' + label);
+    lastTask = { url: url, body: body, label: label };
 
     var res = await api(url, {
       method: 'POST',
@@ -695,8 +720,13 @@ const DefaultPage = `<!doctype html>
             a.textContent = '打开签名页';
             el('logs').appendChild(a);
           }
-          if (t.status === 'failed') log('失败：' + (t.error || '未知错误'), 'err');
-          else log('完成', 'ok');
+          if (t.status === 'failed') {
+            log('失败：' + (t.error || '未知错误'), 'err');
+            offerRetry();
+          } else {
+            log('完成', 'ok');
+            lastTask = null;
+          }
           refresh();
         });
     });

@@ -321,12 +321,6 @@ type publishRequest struct {
 	ProxyMode string `json:"proxyMode"`
 	// ProxyURL 只在 manual 模式下用到。
 	ProxyURL string `json:"proxyUrl"`
-
-	// Client 是本次发布要用的 http client。
-	//
-	// 「重试」会拿上一次的请求原样再跑一次，那时不能再重设一遍所有字段，
-	// 所以整份请求连 client 一起带着走。
-	Client *http.Client `json:"-"`
 }
 
 func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
@@ -415,19 +409,16 @@ func (s *Server) publishArweave(t *Task, site *publish.Site, req publishRequest,
 
 	// 一个 client 贯穿整轮发布：报交易、逐块 /chunk、取记录都走它。
 	// 分开造的话，代理设置很容易只对其中几步生效。
-	client := req.Client
-	if client == nil {
-		mode, err := arweave.ParseProxyMode(req.ProxyMode)
-		if err != nil {
-			return err
-		}
-		if mode == arweave.ProxyManual && strings.TrimSpace(req.ProxyURL) == "" {
-			return fmt.Errorf("手动代理模式需要填代理地址")
-		}
-		client, err = arweave.NewClient(arweave.ProxyConfig{Mode: mode, URL: req.ProxyURL}, 0)
-		if err != nil {
-			return err
-		}
+	mode, err := arweave.ParseProxyMode(req.ProxyMode)
+	if err != nil {
+		return err
+	}
+	if mode == arweave.ProxyManual && strings.TrimSpace(req.ProxyURL) == "" {
+		return fmt.Errorf("手动代理模式需要填代理地址")
+	}
+	client, err := arweave.NewClient(arweave.ProxyConfig{Mode: mode, URL: req.ProxyURL}, 0)
+	if err != nil {
+		return err
 	}
 
 	svc := signer.New([]byte(signer.DefaultPage))
