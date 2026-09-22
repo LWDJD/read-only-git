@@ -9,7 +9,6 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"time"
 )
 
 // DefaultNode 是提交交易用的节点。
@@ -160,9 +159,7 @@ func (e *nodeError) Error() string {
 //
 // 非 2xx 时同样返回响应体，调用方可以用它判断是否值得重试。
 func postJSON(ctx context.Context, node, path string, body []byte, client *http.Client) ([]byte, error) {
-	if client == nil {
-		client = &http.Client{Timeout: 10 * time.Minute}
-	}
+	client = clientOrDefault(client)
 	url := strings.TrimRight(node, "/") + path
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {

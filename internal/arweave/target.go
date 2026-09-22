@@ -3,6 +3,7 @@ package arweave
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"path/filepath"
 	"strings"
 	"time"
@@ -32,7 +33,11 @@ type Target struct {
 	// RecordPath 是发布记录在站点内的相对路径（用 / 分隔）。非空时会把记录
 	// 也传上链并写进 manifest，换机器后能靠入口取回来。
 	RecordPath string
-	Logf       func(format string, args ...any)
+	// Client 是所有对外请求（取记录、报交易、逐块 /chunk）用的 http client。
+	// 为空时按系统代理造一个。发布失败十有八九出在这里，
+	// 所以它必须是可配的，而不是隐式用标准库默认值。
+	Client *http.Client
+	Logf   func(format string, args ...any)
 }
 
 func (t *Target) Name() string { return "arweave" }
@@ -179,7 +184,8 @@ func (t *Target) Publish(ctx context.Context, site *publish.Site, prev *publish.
 		if err != nil {
 			return rec, fmt.Errorf("签名交易失败: %w", err)
 		}
-		txID, err := SubmitBundle(ctx, t.Node, bundle, tags, sig, nil, t.logf)
+		// client 传 t.Client：没配时 SubmitBundle 内部会按系统代理兑底。
+		txID, err := SubmitBundle(ctx, t.Node, bundle, tags, sig, t.Client, t.logf)
 		if err != nil {
 			return rec, err
 		}

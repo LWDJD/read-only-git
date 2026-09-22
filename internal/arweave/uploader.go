@@ -23,19 +23,36 @@ const DefaultEndpoint = "https://turbo.ardrive.io"
 // Uploader 把已签名的 data item 提交到上传服务。
 type Uploader struct {
 	Endpoint string
-	Client   *http.Client
+	// Client 为 nil 时按系统代理造一个。所有对外请求都应当走它，
+	// 而不是各处自己 new：漏掉一处的后果是代理设置对那一步不起作用。
+	Client *http.Client
 	// RetryBackoff 是重试的基础间隔，默认 2s。测试里可以调小。
 	RetryBackoff time.Duration
 }
 
 // NewUploader 创建一个上传器；endpoint 为空时用默认服务。
+//
+// 它不接 client 参数，是为了让「只想造个上传器」的调用点保持简单：
+// 默认就是跟着系统代理走。要指定出口用 NewUploaderWithClient。
 func NewUploader(endpoint string) *Uploader {
+	return NewUploaderWithClient(endpoint, nil)
+}
+
+// NewUploaderWithClient 用一个指定的 client 创建上传器。
+//
+// client 为 nil 表示「跟着系统代理走」，与不配置时的期望一致。
+func NewUploaderWithClient(endpoint string, client *http.Client) *Uploader {
 	if strings.TrimSpace(endpoint) == "" {
 		endpoint = DefaultEndpoint
 	}
+	if client == nil {
+		// 系统模式下几乎不会失败（环境变量与注册表都是本地读取），
+		// 真失败了也只是退回标准库默认行为，不值得在这里打断调用方。
+		client, _ = NewClient(ProxyConfig{Mode: ProxySystem}, 5*time.Minute)
+	}
 	return &Uploader{
 		Endpoint: endpoint,
-		Client:   &http.Client{Timeout: 5 * time.Minute},
+		Client:   client,
 	}
 }
 

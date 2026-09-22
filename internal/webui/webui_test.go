@@ -299,6 +299,69 @@ func TestReplaceRejectsEscapeButWritesRest(t *testing.T) {
 // b64 把一小段文本编成接口要的 base64。
 func b64(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
 
+// 手动代理模式却没填地址，应当在动网络之前就报错。
+//
+// 检查要早于起签名服务：否则会先弹出个签名页，用户白等一场
+// 才发现代理没填。
+func TestPublishRejectsManualProxyWithoutURL(t *testing.T) {
+	site := t.TempDir()
+	if err := os.WriteFile(filepath.Join(site, "a.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv := newTestServer(t, site)
+
+	code, out := postJSON(t, srv.baseURL()+"api/publish", map[string]any{
+		"site": site, "target": "turbo", "proxyMode": "manual",
+	})
+	if code != http.StatusOK {
+		t.Fatalf("建任务应当返回 200，实际 %d", code)
+	}
+	taskID, _ := out["taskId"].(string)
+
+	var snap map[string]any
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		getJSON(t, srv.baseURL()+"api/task/"+taskID, &snap)
+		if snap["status"] != "running" {
+			break
+		}
+		time.Sleep(30 * time.Millisecond)
+	}
+	if snap["status"] != "failed" {
+		t.Fatalf("应当失败，实际 %v", snap["status"])
+	}
+	if msg, _ := snap["error"].(string); !strings.Contains(msg, "代理") {
+		t.Fatalf("失败原因应当点明代理配置，实际 %q", msg)
+	}
+}
+
+// 未知的代理模式同样要提前拦住。
+func TestPublishRejectsUnknownProxyMode(t *testing.T) {
+	site := t.TempDir()
+	if err := os.WriteFile(filepath.Join(site, "a.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv := newTestServer(t, site)
+
+	_, out := postJSON(t, srv.baseURL()+"api/publish", map[string]any{
+		"site": site, "target": "turbo", "proxyMode": "bogus",
+	})
+	taskID, _ := out["taskId"].(string)
+
+	var snap map[string]any
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		getJSON(t, srv.baseURL()+"api/task/"+taskID, &snap)
+		if snap["status"] != "running" {
+			break
+		}
+		time.Sleep(30 * time.Millisecond)
+	}
+	if msg, _ := snap["error"].(string); !strings.Contains(msg, "代理") {
+		t.Fatalf("失败原因应当点明代理模式，实际 %q", msg)
+	}
+}
+
 func TestDeleteFile(t *testing.T) {
 	site := t.TempDir()
 	target := filepath.Join(site, "a.txt")

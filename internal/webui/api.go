@@ -317,6 +317,16 @@ type publishRequest struct {
 	Node     string `json:"node"`
 	From     string `json:"from"`
 	Gateway  string `json:"gateway"`
+	// ProxyMode 是网络出口：system（默认，跟随系统设置）/ manual / off。
+	ProxyMode string `json:"proxyMode"`
+	// ProxyURL 只在 manual 模式下用到。
+	ProxyURL string `json:"proxyUrl"`
+
+	// Client 是本次发布要用的 http client。
+	//
+	// 「重试」会拿上一次的请求原样再跑一次，那时不能再重设一遍所有字段，
+	// 所以整份请求连 client 一起带着走。
+	Client *http.Client `json:"-"`
 }
 
 func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
@@ -403,6 +413,23 @@ func (s *Server) publishLocal(t *Task, site *publish.Site, req publishRequest) e
 func (s *Server) publishArweave(t *Task, site *publish.Site, req publishRequest, useL1 bool) error {
 	repo := repoNameFor(site.Root)
 
+	// 一个 client 贯穿整轮发布：报交易、逐块 /chunk、取记录都走它。
+	// 分开造的话，代理设置很容易只对其中几步生效。
+	client := req.Client
+	if client == nil {
+		mode, err := arweave.ParseProxyMode(req.ProxyMode)
+		if err != nil {
+			return err
+		}
+		if mode == arweave.ProxyManual && strings.TrimSpace(req.ProxyURL) == "" {
+			return fmt.Errorf("手动代理模式需要填代理地址")
+		}
+		client, err = arweave.NewClient(arweave.ProxyConfig{Mode: mode, URL: req.ProxyURL}, 0)
+		if err != nil {
+			return err
+		}
+	}
+
 	svc := signer.New([]byte(signer.DefaultPage))
 	if err := svc.Start(); err != nil {
 		return err
@@ -422,8 +449,8 @@ func (s *Server) publishArweave(t *Task, site *publish.Site, req publishRequest,
 	}
 
 	if req.From != "" {
-		fetched, ferr := arweave.FetchRecord(context.Background(), req.Gateway, req.From,
-			publish.RecordRelPath("arweave", repo))
+		fetched, ferr := arweave.FetchRecordWithClient(context.Background(), req.Gateway, req.From,
+			publish.RecordRelPath("arweave", repo), client)
 		if ferr != nil {
 			return ferr
 		}
@@ -438,13 +465,14 @@ func (s *Server) publishArweave(t *Task, site *publish.Site, req publishRequest,
 		Repo:       repo,
 		Signer:     svc,
 		RecordPath: publish.RecordRelPath("arweave", repo),
+		Client:     client,
 		Logf:       t.Logf,
 	}
 	if useL1 {
 		target.TxSigner = svc
 		target.Node = req.Node
 	} else {
-		target.Uploader = arweave.NewUploader(req.Endpoint)
+		target.Uploader = arweave.NewUploaderWithClient(req.Endpoint, client)
 	}
 
 	// 给整轮等签名加个上限：用户关掉页面时不该把进程永久挂住

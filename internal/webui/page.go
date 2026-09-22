@@ -195,6 +195,15 @@ const DefaultPage = `<!doctype html>
         <label>节点</label>
         <input id="pubNode" placeholder="https://arweave.net">
       </div>
+      <label>网络出口（发布时访问节点与网关）</label>
+      <div class="row">
+        <select id="pubProxyMode" style="flex:1">
+          <option value="system">跟随系统代理</option>
+          <option value="manual">手动指定</option>
+          <option value="off">不走代理</option>
+        </select>
+        <input id="pubProxyUrl" placeholder="http://127.0.0.1:7890" style="flex:2">
+      </div>
       <label>从链上恢复（可选，填入口 id）</label>
       <input id="pubFrom" placeholder="re22tX-…">
       <p class="muted" style="margin:0">仓库名取站点目录名，不用填。</p>
@@ -739,6 +748,8 @@ const DefaultPage = `<!doctype html>
       endpoint: el('pubEndpoint').value.trim(),
       node: el('pubNode').value.trim(),
       from: el('pubFrom').value.trim(),
+      proxyMode: el('pubProxyMode').value,
+      proxyUrl: el('pubProxyUrl').value.trim(),
     }, '发布到 ' + activeTarget);
   };
 

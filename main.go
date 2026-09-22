@@ -88,6 +88,8 @@ func usage(w *os.File) {
 	fmt.Fprintln(w, "  --endpoint <地址>  上传服务，默认 turbo.ardrive.io（非 L1 时使用）")
 	fmt.Fprintln(w, "  --from <入口 id>   从链上取回上次的发布记录，续上增量能力")
 	fmt.Fprintln(w, "  --gateway <地址>   读取用的网关，默认 arweave.net")
+	fmt.Fprintln(w, "  --proxy <模式>     网络出口：system（默认，跟随系统设置）/ manual / off")
+	fmt.Fprintln(w, "  --proxy-url <地址> manual 模式下的代理，如 http://127.0.0.1:7890")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "publish 会复用上一次的发布记录（存在 <站点目录>/.rog/ 下），")
 	fmt.Fprintln(w, "只处理内容变化的文件。记录本身也会随站点上链，")
@@ -199,6 +201,8 @@ func cmdPublish(args []string) error {
 	gateway := ""
 	useL1 := false
 	node := ""
+	proxyMode := ""
+	proxyURL := ""
 	var pos []string
 
 	for i := 0; i < len(args); i++ {
@@ -226,6 +230,18 @@ func cmdPublish(args []string) error {
 			}
 			i++
 			fromEntry = args[i]
+		case "--proxy":
+			if i+1 >= len(args) {
+				return fmt.Errorf("--proxy 后面缺少值")
+			}
+			i++
+			proxyMode = args[i]
+		case "--proxy-url":
+			if i+1 >= len(args) {
+				return fmt.Errorf("--proxy-url 后面缺少值")
+			}
+			i++
+			proxyURL = args[i]
 		case "--gateway":
 			if i+1 >= len(args) {
 				return fmt.Errorf("--gateway 后面缺少值")
@@ -254,7 +270,8 @@ func cmdPublish(args []string) error {
 	}
 
 	if toArweave {
-		return cmdPublishArweave(pos[0], repo, endpoint, fromEntry, gateway, useL1, node)
+		return cmdPublishArweave(pos[0], repo, endpoint, fromEntry, gateway, useL1, node,
+			arweave.ProxyConfig{Mode: arweave.ProxyMode(proxyMode), URL: proxyURL})
 	}
 
 	if len(pos) < 2 {
@@ -321,7 +338,8 @@ func cmdPublishLocal(siteDir, destDir string) error {
 //
 // 两条路：默认逐个把 data item 交给上传服务；useL1 时攒成一包，
 // 让钱包签一笔以该包为 data 的交易，直接提交到节点，不经过任何打包服务。
-func cmdPublishArweave(siteDir, repo, endpoint, fromEntry, gateway string, useL1 bool, node string) error {
+func cmdPublishArweave(siteDir, repo, endpoint, fromEntry, gateway string, useL1 bool, node string,
+	proxy arweave.ProxyConfig) error {
 	site, err := publish.Scan(siteDir)
 	if err != nil {
 		return err
@@ -331,6 +349,21 @@ func cmdPublishArweave(siteDir, repo, endpoint, fromEntry, gateway string, useL1
 	}
 	if repo == "" {
 		repo = filepath.Base(site.Root)
+	}
+
+	// 一个 client 贯穿整轮发布：报交易、逐块 /chunk、取记录都走它。
+	// 分开造的话，代理设置很容易只对其中几步生效，
+	// 而失败的那一步往往正好是没生效的那一步。
+	mode, err := arweave.ParseProxyMode(string(proxy.Mode))
+	if err != nil {
+		return err
+	}
+	if mode == arweave.ProxyManual && proxy.URL == "" {
+		return fmt.Errorf("手动代理模式需要 --proxy-url")
+	}
+	client, err := arweave.NewClient(arweave.ProxyConfig{Mode: mode, URL: proxy.URL}, 0)
+	if err != nil {
+		return err
 	}
 
 	svc := signer.New([]byte(signer.DefaultPage))
@@ -343,7 +376,7 @@ func cmdPublishArweave(siteDir, repo, endpoint, fromEntry, gateway string, useL1
 		node = arweave.DefaultNode
 	}
 
-	uploader := arweave.NewUploader(endpoint)
+	uploader := arweave.NewUploaderWithClient(endpoint, client)
 	// 记录身份用仓库名而不是上传端点：data item id 是内容寻址的，
 	// 换一个端点，同一份内容仍然是同一个 id，用端点分键只会白白重传一遍。
 	statePath := publish.StatePath(site.Root, "arweave", repo)
@@ -357,8 +390,8 @@ func cmdPublishArweave(siteDir, repo, endpoint, fromEntry, gateway string, useL1
 	// --from：把链上那份发布记录取回来，续上增量能力。
 	// 换机器、本地 .rog 丢了之后走这条路，不必从零重传。
 	if fromEntry != "" {
-		fetched, ferr := arweave.FetchRecord(context.Background(), gateway, fromEntry,
-			publish.RecordRelPath("arweave", repo))
+		fetched, ferr := arweave.FetchRecordWithClient(context.Background(), gateway, fromEntry,
+			publish.RecordRelPath("arweave", repo), client)
 		if ferr != nil {
 			return ferr
 		}
@@ -373,6 +406,7 @@ func cmdPublishArweave(siteDir, repo, endpoint, fromEntry, gateway string, useL1
 		Repo:       repo,
 		Signer:     svc,
 		RecordPath: publish.RecordRelPath("arweave", repo),
+		Client:     client,
 		Logf: func(format string, a ...any) {
 			fmt.Printf("  "+format+"\n", a...)
 		},
