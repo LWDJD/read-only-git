@@ -181,6 +181,20 @@ func StatePath(siteRoot, target, identity string) string {
 	return filepath.Join(siteRoot, StateDir, recordFileName(target, identity))
 }
 
+// PendingPath 返回「已签名未提交的交易」在本地磁盘上的路径。
+//
+// 与发布记录同一套命名规则，只是前缀不同：同样按「站点 + 目标 + 身份」
+// 分文件，否则两个仓库名的待提交交易会互相顶掉。
+// 这份东西不进版本库，也不参与发布（StateDir 整体被忽略）。
+func PendingPath(siteRoot, target, identity string) string {
+	if identity == "" {
+		identity = "default"
+	}
+	sum := sha256.Sum256([]byte(identity))
+	name := fmt.Sprintf("pending-%s-%s.json", target, hex.EncodeToString(sum[:4]))
+	return filepath.Join(siteRoot, StateDir, name)
+}
+
 // RecordRelPath 返回记录在站点内的相对路径（用 / 分隔）。
 //
 // 记录会作为站点内容一并发布，所以这个路径要能被 manifest 直接引用，

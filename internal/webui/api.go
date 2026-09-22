@@ -117,14 +117,14 @@ type scaffoldState struct {
 }
 
 type stateResponse struct {
-	Site      string          `json:"site"`
-	Exists    bool            `json:"exists"`
-	Files     []fileState     `json:"files"`
-	TotalSize int64           `json:"totalSize"`
-	Repos     []repoState     `json:"repos"`
-	Records   []recordState   `json:"records"`
-	Scaffold  scaffoldState   `json:"scaffold"`
-	Error     string          `json:"error,omitempty"`
+	Site      string        `json:"site"`
+	Exists    bool          `json:"exists"`
+	Files     []fileState   `json:"files"`
+	TotalSize int64         `json:"totalSize"`
+	Repos     []repoState   `json:"repos"`
+	Records   []recordState `json:"records"`
+	Scaffold  scaffoldState `json:"scaffold"`
+	Error     string        `json:"error,omitempty"`
 }
 
 func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
@@ -262,6 +262,11 @@ type packRequest struct {
 	// Rebuild 为真时忽略已有产物，从零重建。
 	// 默认不填就是自动：目标里已有这个仓库就增量，否则全量。
 	Rebuild bool `json:"rebuild"`
+	// Proxy 是拉远端仓库时给 git 用的代理地址。
+	//
+	// 单独一个字段，与发布时的 http 代理分开：拉取用 git，
+	// 上传用 Go 自己的 client，两者走的是不同的通道。
+	Proxy string `json:"proxy"`
 }
 
 func (s *Server) handlePack(w http.ResponseWriter, r *http.Request) {
@@ -280,6 +285,7 @@ func (s *Server) handlePack(w http.ResponseWriter, r *http.Request) {
 			OutDir:  req.OutDir,
 			Name:    req.Name,
 			Rebuild: req.Rebuild,
+			Proxy:   req.Proxy,
 			Logf:    t.Logf,
 		})
 		if err != nil {
@@ -453,8 +459,11 @@ func (s *Server) publishArweave(t *Task, site *publish.Site, req publishRequest,
 		Repo:       repo,
 		Signer:     svc,
 		RecordPath: publish.RecordRelPath("arweave", repo),
-		Client:     client,
-		Logf:       t.Logf,
+		// 签好但没提交成功的交易落在这里，重试时直接复用，
+		// 不必再让用户去钱包里点一次。
+		PendingPath: publish.PendingPath(site.Root, "arweave", repo),
+		Client:      client,
+		Logf:        t.Logf,
 	}
 	if useL1 {
 		target.TxSigner = svc

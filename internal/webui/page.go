@@ -180,6 +180,8 @@ const DefaultPage = `<!doctype html>
       </div>
       <label>仓库名（留空则从源推导）</label>
       <input id="packName" placeholder="myrepo">
+      <label>远端源代理（可选，拉远端仓库时用）</label>
+      <input id="packProxy" placeholder="http://127.0.0.1:7890">
       <label><input type="checkbox" id="packRebuild" style="width:auto"> 完整重打包（忽略已有产物，从零重建）</label>
       <p class="muted" style="margin:4px 0 0">默认自动：站点里已有这个仓库就做增量，只传变化的文件。</p>
       <button class="primary" id="doPack">开始打包</button>
@@ -1139,6 +1141,7 @@ const DefaultPage = `<!doctype html>
       source: el('packSource').value.trim(),
       outDir: el('packOut').value.trim(),
       name: el('packName').value.trim(),
+      proxy: el('packProxy').value.trim(),
       rebuild: el('packRebuild').checked,
     }, '打包');
   };

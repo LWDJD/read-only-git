@@ -76,6 +76,7 @@ func usage(w *os.File) {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "pack 的参数:")
 	fmt.Fprintln(w, "  --rebuild  忽略已有产物，从零重建；默认自动（有旧产物就增量）")
+	fmt.Fprintln(w, "  --proxy <地址>  拉远端仓库时用的代理，如 http://127.0.0.1:7890")
 	fmt.Fprintln(w, "  <源仓库>   必填。本地路径（普通或裸仓库），或远端地址")
 	fmt.Fprintln(w, "  [输出目录] 默认 ./public，站点根目录")
 	fmt.Fprintln(w, "  [仓库名]   默认从源推导；写成带 .git 的也会被归一化掉")
@@ -406,7 +407,10 @@ func cmdPublishArweave(siteDir, repo, endpoint, fromEntry, gateway string, useL1
 		Repo:       repo,
 		Signer:     svc,
 		RecordPath: publish.RecordRelPath("arweave", repo),
-		Client:     client,
+		// 签好但没提交成功的交易落在这里，重试时直接复用，
+		// 不必再让用户去钱包里点一次。
+		PendingPath: publish.PendingPath(site.Root, "arweave", repo),
+		Client:      client,
 		Logf: func(format string, a ...any) {
 			fmt.Printf("  "+format+"\n", a...)
 		},
@@ -544,13 +548,20 @@ func openBrowser(url string) {
 func cmdPack(args []string) error {
 	// 位置参数与开关混用，先把开关挑出来。
 	rebuild := false
+	proxy := ""
 	var pos []string
-	for _, a := range args {
-		switch a {
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
 		case "--rebuild", "--full", "-r":
 			rebuild = true
+		case "--proxy":
+			if i+1 >= len(args) {
+				return fmt.Errorf("--proxy 后面缺少值")
+			}
+			i++
+			proxy = args[i]
 		default:
-			pos = append(pos, a)
+			pos = append(pos, args[i])
 		}
 	}
 	args = pos
@@ -564,6 +575,8 @@ func cmdPack(args []string) error {
 		Source:  args[0],
 		OutDir:  "public",
 		Rebuild: rebuild,
+		// 只对拉远端仓库有意义；本地源用不上。
+		Proxy: proxy,
 		Logf: func(format string, a ...any) {
 			fmt.Printf(format+"\n", a...)
 		},
