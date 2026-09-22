@@ -129,7 +129,7 @@ func txPayload(data []byte, tags []Tag, sig *TxSignature) ([]byte, error) {
 		ID:        sig.ID,
 		LastTx:    sig.LastTx,
 		Owner:     sig.Owner,
-		Tags:      tags,
+		Tags:      encodeTxTags(tags),
 		Target:    "",
 		Quantity:  "0",
 		Data:      base64.RawURLEncoding.EncodeToString(data),
@@ -139,6 +139,31 @@ func txPayload(data []byte, tags []Tag, sig *TxSignature) ([]byte, error) {
 		Signature: sig.Signature,
 	}
 	return json.Marshal(tx)
+}
+
+// encodeTxTags 把 tags 编成交易 JSON 里的形式。
+//
+// 这里反直觉：交易 JSON 里的 tags **不是明文**，name 与 value 都要 base64url。
+// 根据是 arweave-js 的实现：addTag 先编码再存
+//
+//	this.tags.push(new Tag(stringToB64Url(name), stringToB64Url(value)))
+//
+// 而 toJSON() 原样输出这份内部表示。节点按 base64url 解，
+// 发明文会被它解成乱码并直接拒掉（报的就是 Invalid JSON）。
+//
+// 注意只在交易 JSON 里编码。data item（ANS-104）的 tags 是明文 UTF-8，
+// 那一条路走钱包的 signDataItem，两者不是一回事，不要一起改。
+//
+// tags 为空时返回空切片而不是 nil：节点对 `"tags":null` 也不客气。
+func encodeTxTags(tags []Tag) []Tag {
+	out := make([]Tag, 0, len(tags))
+	for _, t := range tags {
+		out = append(out, Tag{
+			Name:  base64.RawURLEncoding.EncodeToString([]byte(t.Name)),
+			Value: base64.RawURLEncoding.EncodeToString([]byte(t.Value)),
+		})
+	}
+	return out
 }
 
 // nodeError 是节点返回的非 2xx 响应。
