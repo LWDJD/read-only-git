@@ -449,6 +449,150 @@ func TestPublishNoLongerPrintsSignURL(t *testing.T) {
 	}
 }
 
+// 重试也要能签名：签名循环必须挂在 runTask 上，不能只绑在发布按钮上。
+//
+// 之前就是绑在按钮上，于是点重试时后端一直在等签名、前端却没人去弹钱包，
+// 用户只看到一句「等待钱包确认」然后就卡住了。
+func TestSignLoopRunsOnRetryToo(t *testing.T) {
+	srv := newTestServer(t, t.TempDir())
+
+	req, err := http.NewRequest(http.MethodGet, srv.baseURL(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Rog-Token", testToken)
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+
+	page, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, want := range []string{
+		"async function runTask(url, body, label, opts)",
+		"if (o.sign)",
+		"lastTask = { url: url, body: body, label: label, opts: o }",
+	} {
+		if !bytes.Contains(page, []byte(want)) {
+			t.Fatalf("runTask 应当把「要不要签名」当参数带着走，缺少：%s", want)
+		}
+	}
+}
+
+// 没连过钱包时自动连一次。
+//
+// 不连就用钱包签名，会被钱包直接拒；而用户看到的是「一直没有弹窗」，
+// 很难猜到是没授权。
+func TestSignLoopConnectsWalletFirst(t *testing.T) {
+	srv := newTestServer(t, t.TempDir())
+
+	req, err := http.NewRequest(http.MethodGet, srv.baseURL(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Rog-Token", testToken)
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+
+	page, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(page, []byte("var walletConnected = false")) {
+		t.Fatal("应当记住钱包连接状态")
+	}
+	if !bytes.Contains(page, []byte("if (!walletConnected) {")) {
+		t.Fatal("签名前应当先确认钱包已连接")
+	}
+}
+
+// 任务跑着的时候按钮要变灰。
+//
+// 这不是装饰：连点两下打包，就是对着同一个目录各干一遍。
+func TestPageDisablesButtonsWhileBusy(t *testing.T) {
+	srv := newTestServer(t, t.TempDir())
+
+	req, err := http.NewRequest(http.MethodGet, srv.baseURL(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Rog-Token", testToken)
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+
+	page, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"function setBusy(",
+		"setBusy(true)",
+		"setBusy(false)",
+		"b.disabled = busy",
+	} {
+		if !bytes.Contains(page, []byte(want)) {
+			t.Fatalf("任务进行中应当禁用按钮，缺少：%s", want)
+		}
+	}
+}
+
+// 打包不再问「增量还是全量」，界面上只留一个「完整重打包」。
+func TestPageHasRebuildInsteadOfIncremental(t *testing.T) {
+	srv := newTestServer(t, t.TempDir())
+
+	req, err := http.NewRequest(http.MethodGet, srv.baseURL(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Rog-Token", testToken)
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+
+	page, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(page, []byte("packIncremental")) {
+		t.Fatal("不该再有「增量更新」勾选框")
+	}
+	if !bytes.Contains(page, []byte("packRebuild")) {
+		t.Fatal("应当有「完整重打包」开关")
+	}
+	if !bytes.Contains(page, []byte("默认自动")) {
+		t.Fatal("应当告诉用户默认是自动判断")
+	}
+}
+
+// 打包接口接受 rebuild 字段，不传就是自动。
+func TestPackAcceptsRebuildFlag(t *testing.T) {
+	site := t.TempDir()
+	srv := newTestServer(t, site)
+
+	src := t.TempDir()
+	code, out := postJSON(t, srv.baseURL()+"api/pack", map[string]any{
+		"source": src, "outDir": site, "name": "x", "rebuild": true,
+	})
+	if code != http.StatusOK {
+		t.Fatalf("建任务应当返回 200，实际 %d", code)
+	}
+	if id, _ := out["taskId"].(string); id == "" {
+		t.Fatal("应当返回 taskId")
+	}
+}
+
 // b64 把一小段文本编成接口要的 base64。
 func b64(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
 

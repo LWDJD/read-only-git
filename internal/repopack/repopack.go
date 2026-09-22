@@ -32,11 +32,19 @@ const stateDir = ".rog"
 
 // Options 是一次打包的输入。
 type Options struct {
-	Source      string                           // 源仓库：本地路径，或 https/git/ssh/file 与 scp 风格地址
-	OutDir      string                           // 站点根目录，即放着 index.html 的那个
-	Name        string                           // 对外标识；留空则从源推导
-	Incremental bool                             // 目标已存在时做增量更新而非重建
-	Logf        func(format string, args ...any) // 日志回调，可为 nil
+	Source string                           // 源仓库：本地路径，或 https/git/ssh/file 与 scp 风格地址
+	OutDir string                           // 站点根目录，即放着 index.html 的那个
+	Name   string                           // 对外标识；留空则从源推导
+	Logf   func(format string, args ...any) // 日志回调，可为 nil
+
+	// Rebuild 为真时丢掉已有产物，从零重建。
+	//
+	// 默认是全自动的：目标里已经有一个能用的仓库就做增量（保留旧 pack，
+	// 内容寻址的旧数据才能复用），没有就全量。原先把这个选择交给调用方
+	// 是个错位——该不该增量取决于磁盘上有没有旧 pack，
+	// 而这个事实工具自己最清楚，让用户猜只会得到两种坏结果：
+	// 该增量时他选了全量（白传一遍），或反过来选了增量但根本没有旧数据。
+	Rebuild bool
 }
 
 // Result 描述一次打包的产物。
@@ -146,8 +154,12 @@ func Pack(opt Options) (*Result, error) {
 	logf("源仓库   %s", opt.Source)
 	logf("目标     %s", target)
 
-	// 增量只对「本地源 + 目标可安全复用」生效，否则退回全量重建。
-	incremental := opt.Incremental && !remote && isUsableTarget(target)
+	// 默认自动：目标已经是一个能用的仓库就增量，否则全量重建。
+	// 远端源（clone）不参与增量，它没有本地旧 pack 可复用。
+	incremental := !opt.Rebuild && !remote && isUsableTarget(target)
+	if opt.Rebuild && !remote {
+		logf("> 完整重打包：忽略已有产物")
+	}
 
 	if err := os.MkdirAll(outRoot, 0o755); err != nil {
 		return nil, err
@@ -177,10 +189,7 @@ func Pack(opt Options) (*Result, error) {
 		via = "incremental"
 
 	case remote:
-		if opt.Incremental {
-			logf("! 远端源暂不支持增量，本次按全量处理")
-		}
-		logf("> 从远端克隆")
+		logf("> 从远端克隆（远端源不做增量）")
 		if _, err := runGit("", "clone", "--bare", "--quiet", opt.Source, target); err != nil {
 			os.RemoveAll(target)
 			return nil, fmt.Errorf("%w\n  检查地址是否写对、网络是否可达。\n  私有仓库需要先让 git 自己拿到凭据", err)

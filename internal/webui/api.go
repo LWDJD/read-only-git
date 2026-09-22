@@ -255,10 +255,12 @@ func readRecords(site string) []recordState {
 // ---------- 打包 ----------
 
 type packRequest struct {
-	Source      string `json:"source"`
-	OutDir      string `json:"outDir"`
-	Name        string `json:"name"`
-	Incremental bool   `json:"incremental"`
+	Source string `json:"source"`
+	OutDir string `json:"outDir"`
+	Name   string `json:"name"`
+	// Rebuild 为真时忽略已有产物，从零重建。
+	// 默认不填就是自动：目标里已有这个仓库就增量，否则全量。
+	Rebuild bool `json:"rebuild"`
 }
 
 func (s *Server) handlePack(w http.ResponseWriter, r *http.Request) {
@@ -273,11 +275,11 @@ func (s *Server) handlePack(w http.ResponseWriter, r *http.Request) {
 
 	id := s.tasks.Run("pack", func(t *Task) {
 		res, err := repopack.Pack(repopack.Options{
-			Source:      req.Source,
-			OutDir:      req.OutDir,
-			Name:        req.Name,
-			Incremental: req.Incremental,
-			Logf:        t.Logf,
+			Source:  req.Source,
+			OutDir:  req.OutDir,
+			Name:    req.Name,
+			Rebuild: req.Rebuild,
+			Logf:    t.Logf,
 		})
 		if err != nil {
 			t.fail(err)

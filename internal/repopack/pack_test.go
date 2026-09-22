@@ -172,7 +172,7 @@ func TestPackIncrementalKeepsOldPack(t *testing.T) {
 	git(t, src, "add", "-A")
 	git(t, src, "commit", "-q", "-m", "second")
 
-	res2, err := Pack(Options{Source: src, OutDir: out, Name: "demo", Incremental: true})
+	res2, err := Pack(Options{Source: src, OutDir: out, Name: "demo"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -203,7 +203,7 @@ func TestPackIncrementalIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 源没有变化，再跑增量
-	res2, err := Pack(Options{Source: src, OutDir: out, Name: "demo", Incremental: true})
+	res2, err := Pack(Options{Source: src, OutDir: out, Name: "demo"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,7 +218,7 @@ func TestPackIncrementalFallsBackWhenTargetMissing(t *testing.T) {
 	out := t.TempDir()
 
 	// 目标不存在，即使要求增量也应退回全量而不是报错
-	res, err := Pack(Options{Source: src, OutDir: out, Name: "demo", Incremental: true})
+	res, err := Pack(Options{Source: src, OutDir: out, Name: "demo"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -244,7 +244,7 @@ func TestPackIncrementalKeepsRefPointingAtExistingCommit(t *testing.T) {
 	// 新分支，指向已经存在的提交（没有任何新对象）
 	git(t, src, "branch", "feature")
 
-	res, err := Pack(Options{Source: src, OutDir: out, Name: "demo", Incremental: true})
+	res, err := Pack(Options{Source: src, OutDir: out, Name: "demo"})
 	if err != nil {
 		t.Fatalf("增量应成功: %v", err)
 	}
@@ -272,7 +272,7 @@ func TestPackIncrementalKeepsTagPointingAtExistingCommit(t *testing.T) {
 	git(t, src, "add", "-A")
 	git(t, src, "commit", "-q", "-m", "second")
 
-	res, err := Pack(Options{Source: src, OutDir: out, Name: "demo", Incremental: true})
+	res, err := Pack(Options{Source: src, OutDir: out, Name: "demo"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -296,7 +296,7 @@ func TestPackIncrementalDeletesRemovedRef(t *testing.T) {
 	git(t, src, "branch", "-D", "feature")
 	git(t, src, "commit", "-q", "--allow-empty", "-m", "more")
 
-	res, err := Pack(Options{Source: src, OutDir: out, Name: "demo", Incremental: true})
+	res, err := Pack(Options{Source: src, OutDir: out, Name: "demo"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -327,7 +327,7 @@ func TestPackIncrementalRemovesExtraRefInTarget(t *testing.T) {
 	git(t, src, "add", "-A")
 	git(t, src, "commit", "-q", "-m", "second")
 
-	res2, err := Pack(Options{Source: src, OutDir: out, Name: "demo", Incremental: true})
+	res2, err := Pack(Options{Source: src, OutDir: out, Name: "demo"})
 	if err != nil {
 		t.Fatalf("目标含额外 ref 时增量不该失败: %v", err)
 	}
@@ -365,7 +365,7 @@ func TestPackTargetNestedInAnotherRepo(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res2, err := Pack(Options{Source: src, OutDir: out, Name: "demo", Incremental: true})
+	res2, err := Pack(Options{Source: src, OutDir: out, Name: "demo"})
 	if err != nil {
 		t.Fatalf("损坏目标时应回退全量而不是报错: %v", err)
 	}
@@ -497,7 +497,7 @@ func TestPackIncrementalIgnoresLocalOnlyRefs(t *testing.T) {
 	git(t, src, "update-ref", "refs/remotes/origin/main", sha)
 	git(t, src, "update-ref", "refs/stash", sha)
 
-	res, err := Pack(Options{Source: src, OutDir: out, Name: "demo", Incremental: true})
+	res, err := Pack(Options{Source: src, OutDir: out, Name: "demo"})
 	if err != nil {
 		t.Fatalf("含 refs/remotes 或 refs/stash 时增量不该失败: %v", err)
 	}
@@ -508,7 +508,110 @@ func TestPackIncrementalIgnoresLocalOnlyRefs(t *testing.T) {
 	}
 
 	// 源零改动时再跑一次也必须稳定
-	if _, err := Pack(Options{Source: src, OutDir: out, Name: "demo", Incremental: true}); err != nil {
+	if _, err := Pack(Options{Source: src, OutDir: out, Name: "demo"}); err != nil {
 		t.Fatalf("二次增量仍应成功: %v", err)
+	}
+}
+
+// 不传任何开关也走增量：目标里已经有这个仓库就够了。
+//
+// 「要不要增量」不该问用户，他知道的信息比工具少。
+func TestPackAutoIncrementsWithoutAnyFlag(t *testing.T) {
+	requireGit(t)
+	src := makeRepo(t, 1)
+	out := t.TempDir()
+
+	res1, err := Pack(Options{Source: src, OutDir: out, Name: "demo"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldPack := res1.Packs[0]
+
+	// 源上加一个提交
+	if err := os.WriteFile(filepath.Join(src, "a.txt"), []byte("much longer content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git(t, src, "add", "-A")
+	git(t, src, "commit", "-q", "-m", "second")
+
+	// 关键：这里什么都不传
+	res2, err := Pack(Options{Source: src, OutDir: out, Name: "demo"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res2.Via != "incremental" {
+		t.Fatalf("目标可用时应当自动增量，实际链路 %q", res2.Via)
+	}
+	found := false
+	for _, p := range res2.Packs {
+		if p == oldPack {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("自动增量也该保留旧 pack %s: %v", oldPack, res2.Packs)
+	}
+}
+
+// 完整重打包：丢掉已有产物，从零重建。
+//
+// 这是「自动增量」的对手方。什么时候真需要它：怀疑产物坏了，
+// 或者想彻底不带历史（旧 pack 不再被任何引用需要）。
+// 增量做不到这两件事——它按定义就要保留旧 pack。
+func TestPackRebuildDiscardsExistingTarget(t *testing.T) {
+	requireGit(t)
+	src := makeRepo(t, 2)
+	out := t.TempDir()
+
+	res1, err := Pack(Options{Source: src, OutDir: out, Name: "demo"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res1.Packs) != 1 {
+		t.Fatalf("首次应该是 1 个 pack，实际 %d", len(res1.Packs))
+	}
+	oldPack := res1.Packs[0]
+
+	if err := os.WriteFile(filepath.Join(src, "a.txt"), []byte("more content here"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git(t, src, "add", "-A")
+	git(t, src, "commit", "-q", "-m", "second")
+
+	res2, err := Pack(Options{Source: src, OutDir: out, Name: "demo", Rebuild: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res2.Via == "incremental" {
+		t.Fatalf("重打包不该走增量，实际 %q", res2.Via)
+	}
+	if len(res2.Packs) != 1 {
+		t.Fatalf("重打包后应当只有 1 个 pack，实际 %v", res2.Packs)
+	}
+	if res2.Packs[0] == oldPack {
+		t.Fatalf("重打包应当产出新的 pack，而不是沿用 %s", oldPack)
+	}
+
+	// 重建完还得是个能用的仓库
+	refs := git(t, res2.Target, "show-ref")
+	if !strings.Contains(refs, "refs/heads/") {
+		t.Fatalf("重打包后仓库应当有分支:\n%s", refs)
+	}
+}
+
+// 远端源永远不做增量：它没有本地旧 pack 可复用。
+//
+// 重打包开关对远端也不改变什么，不该把这条路径当作错误。
+func TestPackRemoteIgnoresRebuild(t *testing.T) {
+	requireGit(t)
+	src := makeRepo(t, 1)
+	out := t.TempDir()
+
+	res, err := Pack(Options{Source: src, OutDir: out, Name: "demo", Rebuild: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Via == "incremental" {
+		t.Fatalf("首次打包不会是增量，实际 %q", res.Via)
 	}
 }

@@ -174,7 +174,8 @@ const DefaultPage = `<!doctype html>
       </div>
       <label>仓库名（留空则从源推导）</label>
       <input id="packName" placeholder="myrepo">
-      <label><input type="checkbox" id="packIncremental" style="width:auto"> 增量更新（保留旧 pack）</label>
+      <label><input type="checkbox" id="packRebuild" style="width:auto"> 完整重打包（忽略已有产物，从零重建）</label>
+      <p class="muted" style="margin:4px 0 0">默认自动：站点里已有这个仓库就做增量，只传变化的文件。</p>
       <button class="primary" id="doPack">开始打包</button>
     </section>
 
@@ -387,6 +388,7 @@ const DefaultPage = `<!doctype html>
   // 签名循环的停止标志。任务一结束就置上，循环自己退出，
   // 免得多转几圈去问一个已经没人应答的端点。
   var signStop = false;
+  var walletConnected = false;
 
   function stopSigning() { signStop = true; }
 
@@ -395,20 +397,35 @@ const DefaultPage = `<!doctype html>
     try {
       var w = await waitForWallet(30000);
       await w.connect(['ACCESS_ADDRESS', 'SIGNATURE', 'SIGN_TRANSACTION']);
+      walletConnected = true;
       el('walletState').textContent = '已连接';
       el('walletState').className = 'ok';
       log('已连接钱包', 'ok');
+      return true;
     } catch (e) {
       var msg = e && e.message ? e.message : String(e);
+      walletConnected = false;
       el('walletState').textContent = '未连接';
       el('walletState').className = 'err';
       log(msg + '。请安装并启用 Wander。', 'err');
+      return false;
     }
   }
 
   // runSignLoop 反复问 /sign/api/next，把待签内容交给钱包。
   async function runSignLoop() {
     signStop = false;
+
+    // 没连过就先连。否则 signDataItem 会被钱包直接拒，
+    // 而用户看到的现象是「一直没有弹窗」，很难猜到是没授权。
+    if (!walletConnected) {
+      var ok = await connectWallet();
+      if (!ok) {
+        log('钱包没连上，签名无法开始', 'err');
+        return;
+      }
+    }
+
     var n = 0;
 
     while (!signStop) {
@@ -828,16 +845,41 @@ const DefaultPage = `<!doctype html>
       if (!lastTask) return;
       // 清掉旧的按钮，免得连点之后堆一列
       Array.prototype.forEach.call(el('logs').querySelectorAll('button.retry'), function (b) { b.remove(); });
-      runTask(lastTask.url, lastTask.body, lastTask.label);
+      runTask(lastTask.url, lastTask.body, lastTask.label, lastTask.opts);
     };
     el('logs').appendChild(btn);
   }
 
+  // 任务跑着的时候把触发按钮都禁掉。
+  //
+  // 打包与发布都不该并发跑：连点两下就是对着同一个目录各干一遍，
+  // 而且两边都以为自己在改同一份东西。后端也有自己的锁，
+  // 但让按钮当场变灰更直接——用户不用等到报错才知道已经在跑了。
+  var BUSY_BUTTONS = ['doPack', 'doPublish', 'doSiteInit'];
+
+  function setBusy(busy) {
+    BUSY_BUTTONS.forEach(function (id) {
+      var b = el(id);
+      if (b) b.disabled = busy;
+    });
+  }
+
   // 所有耗时操作都走这里：先拿 taskId，再订阅 SSE 看进度。
-  async function runTask(url, body, label) {
+  //
+  // opts.sign 为真时同时跑签名循环。这件事必须挂在这里而不是绑在
+  // 「发布」按钮上：重试走的是同一个 runTask，绑在按钮上就会漏掉，
+  // 而后端一直在等签名，用户只看到一句「等待钱包确认」却没有任何反应。
+  async function runTask(url, body, label, opts) {
     clearLog();
     log('> ' + label);
-    lastTask = { url: url, body: body, label: label };
+    var o = opts || {};
+    lastTask = { url: url, body: body, label: label, opts: o };
+    setBusy(true);
+
+    if (o.sign) {
+      // 不 await：它要一直跑到任务收尾
+      runSignLoop();
+    }
 
     var res = await api(url, {
       method: 'POST',
@@ -845,8 +887,16 @@ const DefaultPage = `<!doctype html>
       body: JSON.stringify(body),
     });
     var out = await res.json();
-    if (!res.ok) { log('发起失败：' + (out.error || res.status), 'err'); return; }
-    if (!out.taskId) { log('后端没有返回 taskId', 'err'); return; }
+    if (!res.ok) {
+      log('发起失败：' + (out.error || res.status), 'err');
+      setBusy(false);
+      return;
+    }
+    if (!out.taskId) {
+      log('后端没有返回 taskId', 'err');
+      setBusy(false);
+      return;
+    }
 
     // EventSource 不能自定义请求头，token 只能跟在 URL 上
     var src = new EventSource('/api/task/' + out.taskId + '/events?token=' + encodeURIComponent(TOKEN));
@@ -860,6 +910,7 @@ const DefaultPage = `<!doctype html>
       src.close();
       // 任务结束，签名循环也该退了，不然它会一直问一个不再有内容的端点
       stopSigning();
+      setBusy(false);
       // 结束后拉一次状态与任务结果
       api('/api/task/' + out.taskId)
         .then(function (r) { return r.json(); })
@@ -874,7 +925,7 @@ const DefaultPage = `<!doctype html>
           refresh();
         });
     });
-    src.onerror = function () { src.close(); };
+    src.onerror = function () { src.close(); setBusy(false); };
   }
 
   el('refresh').onclick = refresh;
@@ -911,16 +962,11 @@ const DefaultPage = `<!doctype html>
       source: el('packSource').value.trim(),
       outDir: el('packOut').value.trim(),
       name: el('packName').value.trim(),
-      incremental: el('packIncremental').checked,
+      rebuild: el('packRebuild').checked,
     }, '打包');
   };
 
   el('doPublish').onclick = function () {
-    // 两条 Arweave 路都要钱包签名。在本页面里直接把签名循环跑起来，
-    // 不再另开一个标签页。
-    if (activeTarget !== 'local') {
-      runSignLoop();
-    }
     runTask('/api/publish', {
       site: site,
       target: activeTarget,
@@ -930,7 +976,11 @@ const DefaultPage = `<!doctype html>
       from: el('pubFrom').value.trim(),
       proxyMode: el('pubProxyMode').value,
       proxyUrl: el('pubProxyUrl').value.trim(),
-    }, '发布到 ' + activeTarget);
+    }, '发布到 ' + activeTarget, {
+      // 两条 Arweave 路都要钱包签名；本地目录不需要。
+      // 这件事交给 runTask 办，重试时才能一起带上。
+      sign: activeTarget !== 'local',
+    });
   };
 
   refresh();

@@ -63,7 +63,7 @@ func usage(w *os.File) {
 	fmt.Fprintln(w, "子命令:")
 	fmt.Fprintln(w, "  site init [目录] [--template <id>] [--force]   铺开站点骨架（前端文件）")
 	fmt.Fprintln(w, "  site list                                    列出内置模板")
-	fmt.Fprintln(w, "  pack [--update] <源仓库> [输出目录] [仓库名]   生成可托管的裸仓库")
+	fmt.Fprintln(w, "  pack [--rebuild] <源仓库> [输出目录] [仓库名]  生成可托管的裸仓库")
 	fmt.Fprintln(w, "  publish <站点目录> [目标目录]                 发布到本地目录")
 	fmt.Fprintln(w, "  publish <站点目录> --arweave [选项]            发布到 Arweave（钱包签名）")
 	fmt.Fprintln(w, "  webui [--site <站点目录>] [--port <端口>]      打开图形界面，功能与命令行一致")
@@ -75,7 +75,7 @@ func usage(w *os.File) {
 	fmt.Fprintln(w, "  --force             覆盖已存在的文件；默认只补缺失的")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "pack 的参数:")
-	fmt.Fprintln(w, "  --update   目标已存在时做增量更新，保留旧 pack；默认全量重建")
+	fmt.Fprintln(w, "  --rebuild  忽略已有产物，从零重建；默认自动（有旧产物就增量）")
 	fmt.Fprintln(w, "  <源仓库>   必填。本地路径（普通或裸仓库），或远端地址")
 	fmt.Fprintln(w, "  [输出目录] 默认 ./public，站点根目录")
 	fmt.Fprintln(w, "  [仓库名]   默认从源推导；写成带 .git 的也会被归一化掉")
@@ -543,12 +543,12 @@ func openBrowser(url string) {
 
 func cmdPack(args []string) error {
 	// 位置参数与开关混用，先把开关挑出来。
-	incremental := false
+	rebuild := false
 	var pos []string
 	for _, a := range args {
 		switch a {
-		case "--incremental", "--update", "-u":
-			incremental = true
+		case "--rebuild", "--full", "-r":
+			rebuild = true
 		default:
 			pos = append(pos, a)
 		}
@@ -561,9 +561,9 @@ func cmdPack(args []string) error {
 	}
 
 	opt := repopack.Options{
-		Source:      args[0],
-		OutDir:      "public",
-		Incremental: incremental,
+		Source:  args[0],
+		OutDir:  "public",
+		Rebuild: rebuild,
 		Logf: func(format string, a ...any) {
 			fmt.Printf(format+"\n", a...)
 		},
