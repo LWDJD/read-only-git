@@ -18,6 +18,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/LWDJD/read-only-git/internal/signer"
 )
 
 // Server 是本机 webui 服务。
@@ -26,6 +28,11 @@ type Server struct {
 	port    int
 	token   string
 	tasks   *Store
+	// sign 是签名通道。
+	//
+	// 它原本是一个独立服务（另起端口、另开页面），现在挂在 webui 自己的
+	// mux 下：发布时用户就在当前页面里确认钱包，不必来回切标签页。
+	sign *signer.Service
 
 	listener net.Listener
 	server   *http.Server
@@ -36,12 +43,20 @@ type Server struct {
 // siteDir 是默认操作的站点目录；port 为 0 时由系统挑一个空闲端口，
 // 传具体值时固定监听该端口，方便反复访问同一个地址。
 func New(siteDir string, port int) *Server {
-	return &Server{
+	s := &Server{
 		siteDir: siteDir,
 		port:    port,
 		token:   newToken(),
 		tasks:   NewStore(),
 	}
+	// 签名通道与 webui 共用一个 token：请求进 webui 时已经验过一遍，
+	// 再验一次只会让页面需要同时持有两个。
+	//
+	// 不传页面：签名逻辑内联在 webui 自己的页面里，
+	// 这里只要那几个端点（/api/next、/api/blob、/api/sign）。
+	s.sign = signer.New(nil)
+	s.sign.SetToken(s.token)
+	return s
 }
 
 // newToken 生成一个随机的会话 token。
@@ -80,6 +95,14 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/api/files/replace", s.guard(s.handleFileReplace))
 	mux.HandleFunc("/api/files/delete", s.guard(s.handleFileDelete))
 	mux.HandleFunc("/api/task/", s.guard(s.handleTask))
+
+	// 签名端点挂在 /sign/ 下。StripPrefix 之后，请求路径与 signer 自己的
+	// 路由表一模一样（/api/next、/api/blob/<id>、/api/sign/<id>、/vendor/arweave.js），
+	// 所以 CLI 那条路与这里共用同一套实现。
+	//
+	// 外面不套 webui 的 guard：signer 自己的 guard 已经在校验，
+	// 而两边 token 相同，套两层只是多一次无意义的字符串比较。
+	mux.Handle("/sign/", http.StripPrefix("/sign", s.sign.Routes()))
 
 	s.server = &http.Server{
 		Handler:           mux,

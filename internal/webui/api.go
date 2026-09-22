@@ -14,7 +14,6 @@ import (
 	"github.com/LWDJD/read-only-git/internal/arweave"
 	"github.com/LWDJD/read-only-git/internal/publish"
 	"github.com/LWDJD/read-only-git/internal/repopack"
-	"github.com/LWDJD/read-only-git/internal/signer"
 	"github.com/LWDJD/read-only-git/internal/sitekit"
 )
 
@@ -421,16 +420,11 @@ func (s *Server) publishArweave(t *Task, site *publish.Site, req publishRequest,
 		return err
 	}
 
-	svc := signer.New([]byte(signer.DefaultPage))
-	if err := svc.Start(); err != nil {
-		return err
-	}
-	defer svc.Close()
-
-	// 立刻把签名页地址交给前端，用户不必去日志里找
-	t.SetData("signUrl", svc.URL())
-	t.Logf("签名页 %s", svc.URL())
-	t.Logf("请在浏览器里打开它并连接钱包")
+	// 签名通道就是挂在 webui /sign/ 下的那一个。
+	//
+	// 不再另起服务、不再另开页面：用户就在当前页面里确认钱包。
+	// 同时也不再往日志里打一个「签名页 <地址>」——那个地址现在不存在了。
+	svc := s.sign
 
 	statePath := publish.StatePath(site.Root, "arweave", repo)
 	prev, err := publish.LoadRecord(statePath)
@@ -469,6 +463,8 @@ func (s *Server) publishArweave(t *Task, site *publish.Site, req publishRequest,
 	// 给整轮等签名加个上限：用户关掉页面时不该把进程永久挂住
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
+
+	t.Logf("等待钱包确认（在页面右上角连接钱包后会自动逐个弹出）")
 
 	rec, err := target.Publish(ctx, site, prev)
 	if rec != nil {

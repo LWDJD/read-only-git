@@ -4,13 +4,16 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -327,8 +330,238 @@ func TestPageOffersRetry(t *testing.T) {
 	}
 }
 
+// 签名端点挂在 webui 的 /sign/ 下，用 webui 的 token 就能访问。
+//
+// 这是「不再另起端口、不再另开页面」的核心：一个 token 走通全程，
+// 用户在同一个标签页里确认钱包。
+func TestSignEndpointsMountedUnderWebUI(t *testing.T) {
+	srv := newTestServer(t, t.TempDir())
+
+	req, err := http.NewRequest(http.MethodGet, srv.baseURL()+"sign/api/next", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Rog-Token", testToken)
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("/sign/api/next 应当可达，实际 %d", res.StatusCode)
+	}
+	var out struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if out.ID != "" {
+		t.Fatalf("还没有发布任务，不该有待签内容，实际 %q", out.ID)
+	}
+}
+
+// arweave-js 也要能从 webui 下取到：页面靠它构造交易。
+//
+// 它不套 token：是公开的第三方库，而且 <script src> 带不了请求头。
+func TestSignVendorServedUnderWebUI(t *testing.T) {
+	srv := newTestServer(t, t.TempDir())
+
+	res, err := http.Get(srv.baseURL() + "sign/vendor/arweave.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("arweave-js 应当可达，实际 %d", res.StatusCode)
+	}
+	if ct := res.Header.Get("Content-Type"); ct != "text/javascript; charset=utf-8" {
+		t.Fatalf("Content-Type = %q", ct)
+	}
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(body) < 10000 {
+		t.Fatalf("arweave-js 体积不对：%d 字节", len(body))
+	}
+}
+
+// 签名端点共用 webui 的 token：拿别的 token 去问应当被拒。
+func TestSignEndpointsRejectWrongToken(t *testing.T) {
+	srv := newTestServer(t, t.TempDir())
+
+	req, err := http.NewRequest(http.MethodGet, srv.baseURL()+"sign/api/next", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Rog-Token", "not-the-token")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode != http.StatusForbidden {
+		t.Fatalf("错误 token 应当被拒，实际 %d", res.StatusCode)
+	}
+}
+
+// 发布任务不再吐一个「签名页 <地址>」让用户自己去开。
+//
+// 连同那句被打印两遍的老问题一起盯住：签名就在当前页面里。
+func TestPublishNoLongerPrintsSignURL(t *testing.T) {
+	site := t.TempDir()
+	if err := os.WriteFile(filepath.Join(site, "a.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv := newTestServer(t, site)
+
+	// 用 manual 代理但不填地址：任务会在这里失败，日志已经成型
+	_, out := postJSON(t, srv.baseURL()+"api/publish", map[string]any{
+		"site": site, "target": "turbo", "proxyMode": "manual",
+	})
+	taskID, _ := out["taskId"].(string)
+
+	var snap map[string]any
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		getJSON(t, srv.baseURL()+"api/task/"+taskID, &snap)
+		if snap["status"] != "running" {
+			break
+		}
+		time.Sleep(30 * time.Millisecond)
+	}
+
+	logs, _ := snap["logs"].([]any)
+	for _, l := range logs {
+		if s, _ := l.(string); strings.Contains(s, "签名页") {
+			t.Fatalf("不该再打印签名页地址，实际有：%q", s)
+		}
+	}
+
+	// 也不该再往 data 里塞 signUrl
+	data, _ := snap["data"].(map[string]any)
+	if _, ok := data["signUrl"]; ok {
+		t.Fatal("不该再往任务 data 里放 signUrl")
+	}
+}
+
 // b64 把一小段文本编成接口要的 base64。
 func b64(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
+
+// 一轮完整的内嵌签名：发布任务排队 → 「页面」取走内容 → 回传签名 → 任务继续。
+//
+// 这是 W4 的端到端。以前签名是个独立服务，测试里得再起一个端口；
+// 现在它就在 webui 自己的 mux 下，用同一个 token 就能走完全程。
+//
+// 这里扮演“页面”的是一段 Go 代码，它按要求依次调 /sign/api/next、
+// /sign/api/blob/<id>、/sign/api/sign/<id>，与浏览器里那段脚本做同一件事。
+// 最终提交由一个假上传服务接住，不碰真网络。
+func TestPublishSignsThroughMountedEndpoints(t *testing.T) {
+	site := t.TempDir()
+	if err := os.WriteFile(filepath.Join(site, "index.html"), []byte("<h1>hi</h1>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(site, "a.txt"), []byte("content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var uploaded int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&uploaded, 1)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"id":"fake-id-%d"}`, n)
+	}))
+	defer upstream.Close()
+
+	srv := newTestServer(t, site)
+
+	code, out := postJSON(t, srv.baseURL()+"api/publish", map[string]any{
+		"site": site, "target": "turbo", "endpoint": upstream.URL, "proxyMode": "off",
+	})
+	if code != http.StatusOK {
+		t.Fatalf("建任务应当返回 200，实际 %d", code)
+	}
+	taskID, _ := out["taskId"].(string)
+
+	// 扮演页面，直到任务收尾
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		for {
+			select {
+			case <-done:
+				return
+			default:
+			}
+
+			req, _ := http.NewRequest(http.MethodGet, srv.baseURL()+"sign/api/next", nil)
+			req.Header.Set("X-Rog-Token", testToken)
+			res, err := http.DefaultClient.Do(req)
+			if err != nil {
+				return
+			}
+			var task struct {
+				ID   string `json:"id"`
+				Kind string `json:"kind"`
+			}
+			_ = json.NewDecoder(res.Body).Decode(&task)
+			res.Body.Close()
+
+			if task.ID == "" {
+				// 暂时没有待签内容，而不是结束了
+				time.Sleep(20 * time.Millisecond)
+				continue
+			}
+
+			// 取内容（这里的内容就是钱包看到的那份字节）
+			breq, _ := http.NewRequest(http.MethodGet, srv.baseURL()+"sign/api/blob/"+task.ID, nil)
+			breq.Header.Set("X-Rog-Token", testToken)
+			bres, err := http.DefaultClient.Do(breq)
+			if err != nil {
+				return
+			}
+			payload, _ := io.ReadAll(bres.Body)
+			bres.Body.Close()
+			if len(payload) == 0 {
+				t.Error("待签内容不该是空的")
+				return
+			}
+
+			// 假签名：真的钱包会在这里闷一个 ANS-104 字节串。
+			// 内容本身对 Uploader 无意义，它只负责把字节递出去。
+			sreq, _ := http.NewRequest(http.MethodPost,
+				srv.baseURL()+"sign/api/sign/"+task.ID, bytes.NewReader([]byte("signed-"+task.ID)))
+			sreq.Header.Set("X-Rog-Token", testToken)
+			sres, err := http.DefaultClient.Do(sreq)
+			if err != nil {
+				return
+			}
+			sres.Body.Close()
+		}
+	}()
+
+	var snap map[string]any
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		getJSON(t, srv.baseURL()+"api/task/"+taskID, &snap)
+		if snap["status"] != "running" {
+			break
+		}
+		time.Sleep(30 * time.Millisecond)
+	}
+	if snap["status"] != "done" {
+		t.Fatalf("发布应当成功，实际 %v：%v", snap["status"], snap["error"])
+	}
+
+	// 4 个内容文件 + 1 份发布记录 + 1 份 manifest = 6 次提交
+	if n := atomic.LoadInt32(&uploaded); n < 3 {
+		t.Fatalf("上传服务收到的提交太少：%d", n)
+	}
+}
 
 // 手动代理模式却没填地址，应当在动网络之前就报错。
 //

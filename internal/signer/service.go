@@ -89,6 +89,19 @@ func (s *Service) Start() error {
 	}
 	s.listener = ln
 
+	s.server = &http.Server{
+		Handler:           s.Routes(),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	go func() { _ = s.server.Serve(ln) }()
+	return nil
+}
+
+// Routes 返回服务的一整套路由。
+//
+// 单独拿出来是为了让 webui 能把它挂到自己的 mux 下：那样就不必再起一个
+// 端口、让用户多开一个页面。CLI 那条路仍旧自己监听。
+func (s *Service) Routes() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.guard(s.handlePage))
 	mux.HandleFunc("/api/next", s.guard(s.handleNext))
@@ -101,13 +114,20 @@ func (s *Service) Start() error {
 	// 而且 <script src> 带不了请求头。
 	mux.HandleFunc("/vendor/arweave.js", s.handleVendor(arweaveBundle, "text/javascript; charset=utf-8"))
 	mux.HandleFunc("/vendor/arweave-LICENSE.txt", s.handleVendor(arweaveLicense, "text/plain; charset=utf-8"))
+	return mux
+}
 
-	s.server = &http.Server{
-		Handler:           mux,
-		ReadHeaderTimeout: 10 * time.Second,
+// SetToken 换一个访问 token。
+//
+// webui 把它挂到自己的 mux 上时用这个：请求那时已经在 webui 的 guard
+// 里验过一次，两边共用一个 token，页面才不用同时带着两个。
+func (s *Service) SetToken(t string) {
+	if t == "" {
+		return
 	}
-	go func() { _ = s.server.Serve(ln) }()
-	return nil
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.token = t
 }
 
 // URL 返回签名页的地址，带上访问 token。
