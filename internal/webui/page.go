@@ -36,6 +36,7 @@ const DefaultPage = `<!doctype html>
     --link: #0969da;
     --ok: #1a7f37;
     --err: #cf222e;
+    --warn: #9a6700;
     --accent: #1f883d;
     --accent-strong: #1a7f37;
     --on-accent: #ffffff;
@@ -57,6 +58,7 @@ const DefaultPage = `<!doctype html>
       --link: #4493f8;
       --ok: #3fb950;
       --err: #f85149;
+      --warn: #d29922;
       --accent: #238636;
       --accent-strong: #2ea043;
       --on-accent: #ffffff;
@@ -119,6 +121,7 @@ const DefaultPage = `<!doctype html>
   }
   .err { color: var(--err); }
   .ok { color: var(--ok); }
+  .warn { color: var(--warn); }
   a { color: var(--link); }
   h2 { display: flex; align-items: center; justify-content: space-between; }
 </style>
@@ -132,6 +135,15 @@ const DefaultPage = `<!doctype html>
 
 <main>
   <div>
+    <section class="panel" id="scaffoldPanel">
+      <h2>站点骨架</h2>
+      <p class="muted" id="scaffoldHint" style="margin:0 0 8px">…</p>
+      <label>模板</label>
+      <select id="tplSelect"></select>
+      <label><input type="checkbox" id="tplOverwrite" style="width:auto"> 覆盖已存在的文件</label>
+      <button class="primary" id="doSiteInit">铺开骨架</button>
+    </section>
+
     <section class="panel">
       <h2>打包</h2>
       <label>源仓库（本地路径，或远端地址）</label>
@@ -232,6 +244,42 @@ const DefaultPage = `<!doctype html>
 
   function clearLog() { el('logs').textContent = ''; }
 
+  // 站点骨架：把内嵌的前端模板写到站点目录。
+  // 只有一个 exe 时靠它把站点立起来。
+  function renderScaffold(st) {
+    var sc = st.scaffold || {};
+    var tpls = sc.templates || [];
+    var sel = el('tplSelect');
+
+    // 只在列表变化时重建，否则每次刷新都会把用户选的模板冲掉
+    var ids = tpls.map(function (t) { return t.id; }).join(',');
+    if (sel.dataset.ids !== ids) {
+      sel.textContent = '';
+      tpls.forEach(function (t) {
+        var opt = document.createElement('option');
+        opt.value = t.id;
+        opt.textContent = t.name + '（' + t.files + ' 个文件）';
+        sel.appendChild(opt);
+      });
+      sel.dataset.ids = ids;
+    }
+
+    var missing = sc.missing || 0;
+    var total = sc.total || 0;
+    var hint = el('scaffoldHint');
+
+    if (!st.exists) {
+      hint.textContent = '站点目录还不存在，铺开骨架会把它一并建好（' + total + ' 个文件）。';
+      hint.className = 'muted';
+    } else if (missing > 0) {
+      hint.textContent = '还缺 ' + missing + ' / ' + total + ' 个骨架文件，界面现在打不开。';
+      hint.className = 'warn';
+    } else {
+      hint.textContent = '骨架完整（' + total + ' 个文件）。';
+      hint.className = 'muted';
+    }
+  }
+
   // 拉一次状态并重画。任何写操作之后都要调用它，不做乐观更新。
   async function refresh() {
     var res = await api('/api/state');
@@ -239,6 +287,8 @@ const DefaultPage = `<!doctype html>
 
     site = st.site;
     el('sitePath').textContent = st.site;
+
+    renderScaffold(st);
 
     if (st.error) {
       log(st.error, 'err');
@@ -385,6 +435,14 @@ const DefaultPage = `<!doctype html>
       el('destL1').hidden = activeTarget !== 'l1';
     };
   });
+
+  el('doSiteInit').onclick = function () {
+    runTask('/api/site/init', {
+      site: site,
+      template: el('tplSelect').value,
+      overwrite: el('tplOverwrite').checked,
+    }, '铺开站点骨架');
+  };
 
   el('doPack').onclick = function () {
     runTask('/api/pack', {

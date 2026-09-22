@@ -73,6 +73,7 @@ func (s *Server) Start() error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.guard(s.handlePage))
 	mux.HandleFunc("/api/state", s.guard(s.handleState))
+	mux.HandleFunc("/api/site/init", s.guard(s.handleSiteInit))
 	mux.HandleFunc("/api/pack", s.guard(s.handlePack))
 	mux.HandleFunc("/api/publish", s.guard(s.handlePublish))
 	mux.HandleFunc("/api/restore", s.guard(s.handleRestore))

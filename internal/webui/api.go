@@ -15,6 +15,7 @@ import (
 	"github.com/LWDJD/read-only-git/internal/publish"
 	"github.com/LWDJD/read-only-git/internal/repopack"
 	"github.com/LWDJD/read-only-git/internal/signer"
+	"github.com/LWDJD/read-only-git/internal/sitekit"
 )
 
 // ---------- 工具 ----------
@@ -100,14 +101,30 @@ type recordState struct {
 	Updated string `json:"updated"`
 }
 
+type templateState struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Files       int    `json:"files"`
+}
+
+type scaffoldState struct {
+	Templates []templateState `json:"templates"`
+	// Missing 是站点里还缺多少个骨架文件。
+	// 大于零说明这个目录还不算一个能打开的站点，界面会提示布一下。
+	Missing int `json:"missing"`
+	Total   int `json:"total"`
+}
+
 type stateResponse struct {
-	Site      string        `json:"site"`
-	Exists    bool          `json:"exists"`
-	Files     []fileState   `json:"files"`
-	TotalSize int64         `json:"totalSize"`
-	Repos     []repoState   `json:"repos"`
-	Records   []recordState `json:"records"`
-	Error     string        `json:"error,omitempty"`
+	Site      string          `json:"site"`
+	Exists    bool            `json:"exists"`
+	Files     []fileState     `json:"files"`
+	TotalSize int64           `json:"totalSize"`
+	Repos     []repoState     `json:"repos"`
+	Records   []recordState   `json:"records"`
+	Scaffold  scaffoldState   `json:"scaffold"`
+	Error     string          `json:"error,omitempty"`
 }
 
 func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
@@ -122,9 +139,12 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 func (s *Server) buildState(site string) stateResponse {
 	out := stateResponse{Site: site}
 
+	// 站点目录不存在不算错误：新建站点时它就是空的。
+	// 把骨架缺多少一并算出来，界面才知道该不该提示布一下。
 	info, err := os.Stat(site)
 	if err != nil || !info.IsDir() {
-		out.Error = fmt.Sprintf("站点目录不存在: %s", site)
+		out.Scaffold = buildScaffold(site)
+		out.Error = fmt.Sprintf("站点目录还不存在: %s", site)
 		return out
 	}
 	out.Exists = true
@@ -141,7 +161,41 @@ func (s *Server) buildState(site string) stateResponse {
 
 	out.Repos = readRegistry(site)
 	out.Records = readRecords(site)
+	out.Scaffold = buildScaffold(site)
 	return out
+}
+
+// buildScaffold 汇总模板信息与目标目录里还缺多少骨架文件。
+//
+// 目录不存在时，所有文件都算缺：这正是「还没有站点」的样子。
+func buildScaffold(site string) scaffoldState {
+	var out scaffoldState
+	for _, tpl := range sitekit.Templates() {
+		out.Templates = append(out.Templates, templateState{
+			ID:          tpl.ID,
+			Name:        tpl.Name,
+			Description: tpl.Description,
+			Files:       tpl.Files,
+		})
+	}
+	out.Total = len(templateFiles("default"))
+
+	missing, err := sitekit.Missing("default", site)
+	if err != nil {
+		// 取不到清单就当作「不知道」，不拿它去吓用户
+		out.Missing = 0
+		return out
+	}
+	out.Missing = len(missing)
+	return out
+}
+
+func templateFiles(id string) []string {
+	files, err := sitekit.Files(id)
+	if err != nil {
+		return nil
+	}
+	return files
 }
 
 func readRegistry(site string) []repoState {
@@ -409,6 +463,67 @@ func (s *Server) publishArweave(t *Task, site *publish.Site, req publishRequest,
 		"preview":   "https://arweave.net/" + rec.Root,
 	})
 	return nil
+}
+
+// ---------- 站点骨架 ----------
+
+type siteInitRequest struct {
+	Site      string `json:"site"`
+	Template  string `json:"template"`
+	Overwrite bool   `json:"overwrite"`
+}
+
+// handleSiteInit 把内嵌的前端模板铺到站点目录。
+//
+// 有了它，一个 exe 就能从零把站点立起来：不必另行准备前端文件。
+func (s *Server) handleSiteInit(w http.ResponseWriter, r *http.Request) {
+	var req siteInitRequest
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	req.Site = siteOf(s, req.Site)
+	if strings.TrimSpace(req.Site) == "" {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("站点目录不能为空"))
+		return
+	}
+	if req.Template == "" {
+		req.Template = "default"
+	}
+
+	id := s.tasks.Run("site-init", func(t *Task) {
+		abs, err := filepath.Abs(req.Site)
+		if err != nil {
+			t.fail(err)
+			return
+		}
+
+		written, err := sitekit.Materialize(req.Template, abs, req.Overwrite)
+		if err != nil {
+			t.fail(err)
+			return
+		}
+
+		if len(written) == 0 {
+			t.Logf("骨架已经齐了，没有改动")
+		} else {
+			t.Logf("写入 %d 个文件到 %s", len(written), abs)
+			for _, rel := range written {
+				t.Logf("  %s", rel)
+			}
+		}
+
+		missing, err := sitekit.Missing(req.Template, abs)
+		if err != nil {
+			t.fail(err)
+			return
+		}
+		if len(missing) > 0 {
+			t.Logf("还缺 %d 个文件（勾选覆盖可补回来）", len(missing))
+		}
+
+		t.succeed(map[string]any{"written": len(written), "site": abs})
+	})
+	writeJSON(w, map[string]string{"taskId": id})
 }
 
 // ---------- 从链上恢复 ----------

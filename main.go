@@ -20,6 +20,7 @@ import (
 	"github.com/LWDJD/read-only-git/internal/publish"
 	"github.com/LWDJD/read-only-git/internal/repopack"
 	"github.com/LWDJD/read-only-git/internal/signer"
+	"github.com/LWDJD/read-only-git/internal/sitekit"
 	"github.com/LWDJD/read-only-git/internal/webui"
 )
 
@@ -39,6 +40,8 @@ func run(args []string) error {
 	switch args[0] {
 	case "pack":
 		return cmdPack(args[1:])
+	case "site":
+		return cmdSite(args[1:])
 	case "publish":
 		return cmdPublish(args[1:])
 	case "webui":
@@ -58,11 +61,18 @@ func usage(w *os.File) {
 	fmt.Fprintln(w, "用法: rog <子命令> [参数]")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "子命令:")
+	fmt.Fprintln(w, "  site init [目录] [--template <id>] [--force]   铺开站点骨架（前端文件）")
+	fmt.Fprintln(w, "  site list                                    列出内置模板")
 	fmt.Fprintln(w, "  pack [--update] <源仓库> [输出目录] [仓库名]   生成可托管的裸仓库")
 	fmt.Fprintln(w, "  publish <站点目录> [目标目录]                 发布到本地目录")
 	fmt.Fprintln(w, "  publish <站点目录> --arweave [选项]            发布到 Arweave（钱包签名）")
 	fmt.Fprintln(w, "  webui [--site <站点目录>] [--port <端口>]      打开图形界面，功能与命令行一致")
 	fmt.Fprintln(w, "  help                                         显示本说明")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "site 的选项:")
+	fmt.Fprintln(w, "  init [目录]         把前端模板写进去，默认 ./public")
+	fmt.Fprintln(w, "  --template <id>     用哪套模板，默认 default")
+	fmt.Fprintln(w, "  --force             覆盖已存在的文件；默认只补缺失的")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "pack 的参数:")
 	fmt.Fprintln(w, "  --update   目标已存在时做增量更新，保留旧 pack；默认全量重建")
@@ -86,6 +96,98 @@ func usage(w *os.File) {
 	fmt.Fprintln(w, "webui 的选项:")
 	fmt.Fprintln(w, "  --site <目录>   默认操作的站点目录，默认 ./public")
 	fmt.Fprintln(w, "  --port <端口>   固定监听端口，默认由系统分配一个空闲的")
+}
+
+func cmdSite(args []string) error {
+	if len(args) > 0 && (args[0] == "-h" || args[0] == "--help") {
+		usage(os.Stdout)
+		return nil
+	}
+	if len(args) == 0 {
+		usage(os.Stderr)
+		return fmt.Errorf("用法: rog site init [目录] [--template <id>] [--force]，或 rog site list")
+	}
+
+	switch args[0] {
+	case "list":
+		for _, tpl := range sitekit.Templates() {
+			fmt.Printf("%-10s %s（%d 个文件）\n", tpl.ID, tpl.Name, tpl.Files)
+			fmt.Printf("           %s\n", tpl.Description)
+		}
+		return nil
+
+	case "init":
+		dir := "public"
+		templateID := "default"
+		force := false
+		var pos []string
+
+		for i := 1; i < len(args); i++ {
+			switch args[i] {
+			case "--force", "-f":
+				force = true
+			case "--template", "-t":
+				if i+1 >= len(args) {
+					return fmt.Errorf("--template 后面缺少值")
+				}
+				i++
+				templateID = args[i]
+			default:
+				if strings.HasPrefix(args[i], "-") {
+					return fmt.Errorf("未知开关: %s", args[i])
+				}
+				pos = append(pos, args[i])
+			}
+		}
+		if len(pos) > 0 {
+			dir = pos[0]
+		}
+		return cmdSiteInit(dir, templateID, force)
+
+	default:
+		return fmt.Errorf("未知的 site 子命令: %s（可选 init / list）", args[0])
+	}
+}
+
+// cmdSiteInit 把嵌在二进制里的前端骨架铺到目录里。
+//
+// 有了它，光一个 exe 就能从零立起站点：先 site init 铺前端，再 pack 写仓库。
+func cmdSiteInit(dir, templateID string, force bool) error {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return err
+	}
+
+	written, err := sitekit.Materialize(templateID, abs, force)
+	if err != nil {
+		return err
+	}
+
+	if len(written) == 0 {
+		fmt.Printf("骨架已经齐了，%s 没有改动\n", abs)
+		return nil
+	}
+
+	fmt.Printf("写入 %d 个文件到 %s\n", len(written), abs)
+	for _, rel := range written {
+		fmt.Printf("  %s\n", rel)
+	}
+
+	missing, err := sitekit.Missing(templateID, abs)
+	if err != nil {
+		return err
+	}
+	if len(missing) > 0 {
+		fmt.Printf("\n注意：还缺 %d 个文件（多半是被改过或删掉了）\n", len(missing))
+		for _, rel := range missing {
+			fmt.Printf("  %s\n", rel)
+		}
+		fmt.Println("用 --force 可以把它们补回来（会覆盖同名文件）")
+	}
+
+	fmt.Println()
+	fmt.Printf("下一步：rog pack <源仓库> %s\n", dir)
+	return nil
 }
 
 func cmdPublish(args []string) error {

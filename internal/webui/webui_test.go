@@ -411,3 +411,105 @@ func TestPublishRejectsWhenAlreadyRunning(t *testing.T) {
 	}
 	t.Fatal("任务迟迟不结束")
 }
+
+// 站点目录不存在时，状态里应当报出「骨架全缺」。
+//
+// 这不是错误，而是「还没建站点」——界面据此提示铺一下骨架。
+func TestStateReportsScaffoldWhenSiteMissing(t *testing.T) {
+	srv := newTestServer(t, filepath.Join(t.TempDir(), "not-created"))
+
+	var st stateResponse
+	getJSON(t, srv.baseURL()+"api/state", &st)
+
+	if st.Exists {
+		t.Fatal("目录不存在时不该说它存在")
+	}
+	if st.Error == "" {
+		t.Fatal("应当带上一句说明")
+	}
+	if st.Scaffold.Total == 0 {
+		t.Fatal("应当报出骨架总共有多少个文件")
+	}
+	if st.Scaffold.Missing != st.Scaffold.Total {
+		t.Fatalf("目录不存在时骨架应当全缺，实际 %d / %d", st.Scaffold.Missing, st.Scaffold.Total)
+	}
+	if len(st.Scaffold.Templates) == 0 {
+		t.Fatal("应当列出内置模板")
+	}
+}
+
+// 铺骨架接口要把内嵌的前端文件写到站点目录。
+//
+// 这正是「只有一个 exe 也能把站点立起来」的那一步。
+func TestSiteInitWritesScaffold(t *testing.T) {
+	site := t.TempDir()
+	srv := newTestServer(t, site)
+
+	code, out := postJSON(t, srv.baseURL()+"api/site/init", map[string]any{
+		"site": site, "template": "default",
+	})
+	if code != http.StatusOK {
+		t.Fatalf("建任务应当返回 200，实际 %d", code)
+	}
+	taskID, _ := out["taskId"].(string)
+	if taskID == "" {
+		t.Fatal("应当返回 taskId")
+	}
+
+	// 等任务收尾
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		var snap map[string]any
+		getJSON(t, srv.baseURL()+"api/task/"+taskID, &snap)
+		if snap["status"] == "done" {
+			break
+		}
+		if snap["status"] == "failed" {
+			t.Fatalf("铺骨架失败: %v", snap["error"])
+		}
+		time.Sleep(30 * time.Millisecond)
+	}
+
+	for _, rel := range []string{"index.html", filepath.Join("src", "main.js")} {
+		if _, err := os.Stat(filepath.Join(site, rel)); err != nil {
+			t.Fatalf("%s 没被写出来: %v", rel, err)
+		}
+	}
+
+	var st stateResponse
+	getJSON(t, srv.baseURL()+"api/state", &st)
+	if st.Scaffold.Missing != 0 {
+		t.Fatalf("铺完之后不该还缺骨架文件，实际缺 %d", st.Scaffold.Missing)
+	}
+}
+
+// 默认不覆盖：界面里改过的文件不该被模板盖掉。
+func TestSiteInitKeepsExistingByDefault(t *testing.T) {
+	site := t.TempDir()
+	target := filepath.Join(site, "index.html")
+	if err := os.WriteFile(target, []byte("我改过的"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv := newTestServer(t, site)
+
+	_, out := postJSON(t, srv.baseURL()+"api/site/init", map[string]any{"site": site})
+	taskID, _ := out["taskId"].(string)
+
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		var snap map[string]any
+		getJSON(t, srv.baseURL()+"api/task/"+taskID, &snap)
+		if snap["status"] != "running" {
+			break
+		}
+		time.Sleep(30 * time.Millisecond)
+	}
+
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "我改过的" {
+		t.Fatal("默认不该覆盖已存在的文件")
+	}
+}
