@@ -9,8 +9,10 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,6 +20,8 @@ import (
 	"github.com/LWDJD/read-only-git/internal/publish"
 	"github.com/LWDJD/read-only-git/internal/repopack"
 	"github.com/LWDJD/read-only-git/internal/signer"
+	"github.com/LWDJD/read-only-git/internal/sitekit"
+	"github.com/LWDJD/read-only-git/internal/webui"
 )
 
 func main() {
@@ -36,8 +40,12 @@ func run(args []string) error {
 	switch args[0] {
 	case "pack":
 		return cmdPack(args[1:])
+	case "site":
+		return cmdSite(args[1:])
 	case "publish":
 		return cmdPublish(args[1:])
+	case "webui":
+		return cmdWebui(args[1:])
 	case "help", "-h", "--help":
 		usage(os.Stdout)
 		return nil
@@ -53,24 +61,133 @@ func usage(w *os.File) {
 	fmt.Fprintln(w, "用法: rog <子命令> [参数]")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "子命令:")
+	fmt.Fprintln(w, "  site init [目录] [--template <id>] [--force]   铺开站点骨架（前端文件）")
+	fmt.Fprintln(w, "  site list                                    列出内置模板")
 	fmt.Fprintln(w, "  pack [--update] <源仓库> [输出目录] [仓库名]   生成可托管的裸仓库")
 	fmt.Fprintln(w, "  publish <站点目录> [目标目录]                 发布到本地目录")
 	fmt.Fprintln(w, "  publish <站点目录> --arweave [选项]            发布到 Arweave（钱包签名）")
+	fmt.Fprintln(w, "  webui [--site <站点目录>] [--port <端口>]      打开图形界面，功能与命令行一致")
 	fmt.Fprintln(w, "  help                                         显示本说明")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "site 的选项:")
+	fmt.Fprintln(w, "  init [目录]         把前端模板写进去，默认 ./public")
+	fmt.Fprintln(w, "  --template <id>     用哪套模板，默认 default")
+	fmt.Fprintln(w, "  --force             覆盖已存在的文件；默认只补缺失的")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "pack 的参数:")
 	fmt.Fprintln(w, "  --update   目标已存在时做增量更新，保留旧 pack；默认全量重建")
 	fmt.Fprintln(w, "  <源仓库>   必填。本地路径（普通或裸仓库），或远端地址")
 	fmt.Fprintln(w, "  [输出目录] 默认 ./public，站点根目录")
-	fmt.Fprintln(w, "  [仓库名]   默认从源推导，带不带 .git 后缀等价")
+	fmt.Fprintln(w, "  [仓库名]   默认从源推导；写成带 .git 的也会被归一化掉")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "publish 的选项:")
 	fmt.Fprintln(w, "  --arweave          发布到 Arweave，会起本地签名页等钱包签名")
+	fmt.Fprintln(w, "  --l1               走 L1：把内容打成一个 ANS-104 包，签一笔交易直接提交")
+	fmt.Fprintln(w, "  --node <地址>      L1 提交用的节点，默认 arweave.net")
 	fmt.Fprintln(w, "  --repo <名字>      写进 data item 的 Repo 标签")
-	fmt.Fprintln(w, "  --endpoint <地址>  上传服务，默认 turbo.ardrive.io")
+	fmt.Fprintln(w, "  --endpoint <地址>  上传服务，默认 turbo.ardrive.io（非 L1 时使用）")
+	fmt.Fprintln(w, "  --from <入口 id>   从链上取回上次的发布记录，续上增量能力")
+	fmt.Fprintln(w, "  --gateway <地址>   读取用的网关，默认 arweave.net")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "publish 会复用上一次的发布记录（存在 <站点目录>/.rog/ 下），")
-	fmt.Fprintln(w, "只处理内容变化的文件。")
+	fmt.Fprintln(w, "只处理内容变化的文件。记录本身也会随站点上链，")
+	fmt.Fprintln(w, "换机器时用 --from 就能取回来。")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "webui 的选项:")
+	fmt.Fprintln(w, "  --site <目录>   默认操作的站点目录，默认 ./public")
+	fmt.Fprintln(w, "  --port <端口>   固定监听端口，默认由系统分配一个空闲的")
+}
+
+func cmdSite(args []string) error {
+	if len(args) > 0 && (args[0] == "-h" || args[0] == "--help") {
+		usage(os.Stdout)
+		return nil
+	}
+	if len(args) == 0 {
+		usage(os.Stderr)
+		return fmt.Errorf("用法: rog site init [目录] [--template <id>] [--force]，或 rog site list")
+	}
+
+	switch args[0] {
+	case "list":
+		for _, tpl := range sitekit.Templates() {
+			fmt.Printf("%-10s %s（%d 个文件）\n", tpl.ID, tpl.Name, tpl.Files)
+			fmt.Printf("           %s\n", tpl.Description)
+		}
+		return nil
+
+	case "init":
+		dir := "public"
+		templateID := "default"
+		force := false
+		var pos []string
+
+		for i := 1; i < len(args); i++ {
+			switch args[i] {
+			case "--force", "-f":
+				force = true
+			case "--template", "-t":
+				if i+1 >= len(args) {
+					return fmt.Errorf("--template 后面缺少值")
+				}
+				i++
+				templateID = args[i]
+			default:
+				if strings.HasPrefix(args[i], "-") {
+					return fmt.Errorf("未知开关: %s", args[i])
+				}
+				pos = append(pos, args[i])
+			}
+		}
+		if len(pos) > 0 {
+			dir = pos[0]
+		}
+		return cmdSiteInit(dir, templateID, force)
+
+	default:
+		return fmt.Errorf("未知的 site 子命令: %s（可选 init / list）", args[0])
+	}
+}
+
+// cmdSiteInit 把嵌在二进制里的前端骨架铺到目录里。
+//
+// 有了它，光一个 exe 就能从零立起站点：先 site init 铺前端，再 pack 写仓库。
+func cmdSiteInit(dir, templateID string, force bool) error {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return err
+	}
+
+	written, err := sitekit.Materialize(templateID, abs, force)
+	if err != nil {
+		return err
+	}
+
+	if len(written) == 0 {
+		fmt.Printf("骨架已经齐了，%s 没有改动\n", abs)
+		return nil
+	}
+
+	fmt.Printf("写入 %d 个文件到 %s\n", len(written), abs)
+	for _, rel := range written {
+		fmt.Printf("  %s\n", rel)
+	}
+
+	missing, err := sitekit.Missing(templateID, abs)
+	if err != nil {
+		return err
+	}
+	if len(missing) > 0 {
+		fmt.Printf("\n注意：还缺 %d 个文件（多半是被改过或删掉了）\n", len(missing))
+		for _, rel := range missing {
+			fmt.Printf("  %s\n", rel)
+		}
+		fmt.Println("用 --force 可以把它们补回来（会覆盖同名文件）")
+	}
+
+	fmt.Println()
+	fmt.Printf("下一步：rog pack <源仓库> %s\n", dir)
+	return nil
 }
 
 func cmdPublish(args []string) error {
@@ -78,6 +195,10 @@ func cmdPublish(args []string) error {
 	toArweave := false
 	repo := ""
 	endpoint := ""
+	fromEntry := ""
+	gateway := ""
+	useL1 := false
+	node := ""
 	var pos []string
 
 	for i := 0; i < len(args); i++ {
@@ -99,6 +220,26 @@ func cmdPublish(args []string) error {
 			}
 			i++
 			endpoint = args[i]
+		case "--from":
+			if i+1 >= len(args) {
+				return fmt.Errorf("--from 后面缺少值")
+			}
+			i++
+			fromEntry = args[i]
+		case "--gateway":
+			if i+1 >= len(args) {
+				return fmt.Errorf("--gateway 后面缺少值")
+			}
+			i++
+			gateway = args[i]
+		case "--l1":
+			useL1 = true
+		case "--node":
+			if i+1 >= len(args) {
+				return fmt.Errorf("--node 后面缺少值")
+			}
+			i++
+			node = args[i]
 		default:
 			if strings.HasPrefix(args[i], "-") {
 				return fmt.Errorf("未知开关: %s", args[i])
@@ -113,7 +254,7 @@ func cmdPublish(args []string) error {
 	}
 
 	if toArweave {
-		return cmdPublishArweave(pos[0], repo, endpoint)
+		return cmdPublishArweave(pos[0], repo, endpoint, fromEntry, gateway, useL1, node)
 	}
 
 	if len(pos) < 2 {
@@ -177,7 +318,10 @@ func cmdPublishLocal(siteDir, destDir string) error {
 //
 // 签名在浏览器钱包里完成，所以这里要起一个本机服务、等用户在页面里签完。
 // 流程是阻塞的：Target.Publish 内部会等每一次签名回来才继续。
-func cmdPublishArweave(siteDir, repo, endpoint string) error {
+//
+// 两条路：默认逐个把 data item 交给上传服务；useL1 时攒成一包，
+// 让钱包签一笔以该包为 data 的交易，直接提交到节点，不经过任何打包服务。
+func cmdPublishArweave(siteDir, repo, endpoint, fromEntry, gateway string, useL1 bool, node string) error {
 	site, err := publish.Scan(siteDir)
 	if err != nil {
 		return err
@@ -195,28 +339,58 @@ func cmdPublishArweave(siteDir, repo, endpoint string) error {
 	}
 	defer svc.Close()
 
+	if node == "" {
+		node = arweave.DefaultNode
+	}
+
 	uploader := arweave.NewUploader(endpoint)
 	// 记录身份用仓库名而不是上传端点：data item id 是内容寻址的，
 	// 换一个端点，同一份内容仍然是同一个 id，用端点分键只会白白重传一遍。
 	statePath := publish.StatePath(site.Root, "arweave", repo)
+
 	prev, err := publish.LoadRecord(statePath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "! %v（按首次发布处理）\n", err)
 		prev = nil
 	}
 
+	// --from：把链上那份发布记录取回来，续上增量能力。
+	// 换机器、本地 .rog 丢了之后走这条路，不必从零重传。
+	if fromEntry != "" {
+		fetched, ferr := arweave.FetchRecord(context.Background(), gateway, fromEntry,
+			publish.RecordRelPath("arweave", repo))
+		if ferr != nil {
+			return ferr
+		}
+		if err := publish.SaveRecord(statePath, fetched); err != nil {
+			return err
+		}
+		fmt.Printf("v 已从链上取回发布记录，含 %d 个文件引用\n", len(fetched.Refs))
+		prev = fetched
+	}
+
 	target := &arweave.Target{
-		Repo:     repo,
-		Uploader: uploader,
-		Signer:   svc,
+		Repo:       repo,
+		Signer:     svc,
+		RecordPath: publish.RecordRelPath("arweave", repo),
 		Logf: func(format string, a ...any) {
 			fmt.Printf("  "+format+"\n", a...)
 		},
 	}
+	if useL1 {
+		target.TxSigner = svc
+		target.Node = node
+	} else {
+		target.Uploader = uploader
+	}
 
 	fmt.Printf("站点   %s（%d 个文件，%s）\n", site.Root, len(site.Files), humanSize(site.TotalSize()))
 	fmt.Printf("仓库   %s\n", repo)
-	fmt.Printf("上传   %s\n", uploader.Endpoint)
+	if useL1 {
+		fmt.Printf("提交   %s（L1，打成一包直接发交易）\n", node)
+	} else {
+		fmt.Printf("上传   %s\n", uploader.Endpoint)
+	}
 	if prev == nil || len(prev.Refs) == 0 {
 		fmt.Println("> 首次发布")
 	} else {
@@ -254,6 +428,66 @@ func cmdPublishArweave(siteDir, repo, endpoint string) error {
 	fmt.Printf("v 记录写入 %s\n", statePath)
 	fmt.Println()
 	fmt.Println("下一步：把这个入口写进 ENS 的 contenthash 记录。")
+	return nil
+}
+
+// cmdWebui 起一个本机图形界面，把维护器的功能都摆出来。
+//
+// 它只是命令行之上的一层壳：所有操作都走内部同一套实现。
+// 只绑 127.0.0.1，不对外开放。
+func cmdWebui(args []string) error {
+	siteDir := "public"
+	port := 0
+
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "-h", "--help":
+			usage(os.Stdout)
+			return nil
+		case "--site":
+			if i+1 >= len(args) {
+				return fmt.Errorf("--site 后面缺少值")
+			}
+			i++
+			siteDir = args[i]
+		case "--port":
+			if i+1 >= len(args) {
+				return fmt.Errorf("--port 后面缺少值")
+			}
+			i++
+			n, err := strconv.Atoi(args[i])
+			if err != nil || n < 0 || n > 65535 {
+				return fmt.Errorf("--port 需要 0 到 65535 之间的数字，实际 %q", args[i])
+			}
+			port = n
+		default:
+			if strings.HasPrefix(args[i], "-") {
+				return fmt.Errorf("未知开关: %s", args[i])
+			}
+			siteDir = args[i]
+		}
+	}
+
+	srv := webui.New(siteDir, port)
+	if err := srv.Start(); err != nil {
+		return err
+	}
+	defer srv.Close()
+
+	fmt.Println("维护台已启动：")
+	fmt.Println()
+	fmt.Printf("  %s\n", srv.URL())
+	fmt.Println()
+	fmt.Printf("站点   %s\n", siteDir)
+	fmt.Println("按 Ctrl+C 退出。")
+	fmt.Println()
+
+	openBrowser(srv.URL())
+
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt)
+	<-sig
+	fmt.Println("\n已退出。")
 	return nil
 }
 
@@ -324,7 +558,7 @@ func cmdPack(args []string) error {
 		if info, err := os.Stat(filepath.Join(res.Target, rel)); err == nil {
 			size = info.Size()
 		}
-		fmt.Printf("   %10s  %s/%s\n", humanSize(size), res.Name+".git", filepath.ToSlash(rel))
+		fmt.Printf("   %10s  %s/%s\n", humanSize(size), res.Name, filepath.ToSlash(rel))
 	}
 
 	fmt.Println()
@@ -333,7 +567,7 @@ func cmdPack(args []string) error {
 	fmt.Printf("v 已写入 %s\n", filepath.Join(outRoot, "repository.json"))
 	fmt.Printf("v 完成。默认分支 %s，链路 %s，可直接部署 %s\n", res.Branch, res.Via, outRoot)
 	fmt.Println()
-	fmt.Printf("  git clone <你的站点>/%s.git\n", res.Name)
+	fmt.Printf("  git clone <你的站点>/%s\n", res.Name)
 
 	if !fileExists(filepath.Join(outRoot, "index.html")) {
 		fmt.Println()

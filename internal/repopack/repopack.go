@@ -127,7 +127,14 @@ func Pack(opt Options) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	target := filepath.Join(outRoot, name+".git")
+	// 目录名就是仓库名，不加 .git 后缀。
+	//
+	// git 对 URL 后缀没有要求：dumb 协议下客户端只会往 base URL 后面拼
+	// info/refs、objects/info/packs 这些固定路径（见 git 的 http.c，它只做
+	// end_url_with_slash 再添上相对路径），目录叫什么都能 clone。
+	// 而 .git 后缀会被一些网关拦掉，eth.limo 就是一例。
+	// 既然两种写法等价，就用不会被拦的那种。
+	target := filepath.Join(outRoot, name)
 
 	// Windows 默认路径上限是 260 字符，但实际更早就会出问题：产物内部还有
 	// objects/pack/pack-<40hex>.pack（约 60 字符）以及 git 自己的临时 .lock，
@@ -749,9 +756,9 @@ func isValidName(name string) bool {
 			return false
 		}
 	}
-	// 目录名是 name+".git"。两个平台的上限都要满足：NTFS 限 255 个 UTF-16
+	// 目录名就是 name。两个平台的上限都要满足：NTFS 限 255 个 UTF-16
 	// 码元，ext4 限 255 字节。字节数更严格（中文一字三字节），按它卡更安全。
-	full := name + ".git"
+	full := name
 	if len(utf16.Encode([]rune(full))) > 255 || len(full) > 255 {
 		return false
 	}

@@ -29,11 +29,22 @@ const DefaultPage = `<!doctype html>
 <button id="go" hidden>开始签名</button>
 <ol id="log"></ol>
 
+<script src="/vendor/arweave.js"></script>
 <script>
 (function () {
   var statusEl = document.getElementById('status');
   var logEl = document.getElementById('log');
   var goEl = document.getElementById('go');
+
+  // token 从地址栏取，所有请求都带上。服务只绑本机，
+  // 但同机的任意网页都能向它发请求，靠这一层挡住别的页面。
+  var TOKEN = new URLSearchParams(location.search).get('token') || '';
+
+  function api(path, opts) {
+    var o = Object.assign({}, opts || {});
+    o.headers = Object.assign({}, o.headers || {}, { 'X-Rog-Token': TOKEN });
+    return fetch(path, o);
+  }
 
   function say(text) { statusEl.textContent = text; }
 
@@ -44,6 +55,66 @@ const DefaultPage = `<!doctype html>
   }
 
   function wallet() { return window.arweaveWallet; }
+
+  /**
+   * 让钱包给一笔「data 就是这一整包」的交易签名。
+   *
+   * arweave-js 在这里只做两件事：构造交易（算 data_root、reward、last_tx），
+   * 以及把交易交给钱包签。签完只回传字段，包体不动，
+   * 免得整份内容再多走一趟 base64。
+   */
+  async function signBundleTransaction(buf, tags) {
+    if (!window.Arweave) throw new Error('arweave-js 没加载出来');
+    var arweave = window.Arweave.init({ host: 'arweave.net', port: 443, protocol: 'https' });
+    var tx = await arweave.createTransaction({ data: new Uint8Array(buf) });
+    var list = tags || [];
+    for (var i = 0; i < list.length; i++) {
+      tx.addTag(list[i].name, list[i].value);
+    }
+    // 省略 JWK 参数时 arweave-js 会走注入的钱包
+    await arweave.transactions.sign(tx);
+
+    // proofs 供 Go 侧走分块上传。超过一块时交易 JSON 不带 data，
+    // 由 Go 按同样的切法逐块发 /chunk。
+    // 不回传块内容本身：那等于把整包再传一遍。
+    var chunkProofs = [];
+    var proofList = (tx.chunks && tx.chunks.proofs) || [];
+    for (var k = 0; k < proofList.length; k++) {
+      chunkProofs.push({
+        data_path: toB64Url(proofList[k].proof),
+        offset: String(proofList[k].offset),
+      });
+    }
+
+    return JSON.stringify({
+      id: tx.id,
+      owner: tx.owner,
+      signature: tx.signature,
+      reward: tx.reward,
+      last_tx: tx.last_tx,
+      // data_root 是签名内容的一部分，Go 侧要拿它拼交易 JSON。
+      // 交易 JSON 里漏了这个字段，签名就不再自洽，节点会拒。
+      data_root: tx.data_root,
+      data_size: tx.data_size,
+      proofs: chunkProofs,
+    });
+  }
+
+  /**
+   * base64url 编码，不带填充。
+   *
+   * 优先用 arweave-js 的；取不到就自己编一份，
+   * 免得因为一个工具函数让整条分块路径在某个版本上失效。
+   */
+  function toB64Url(bytes) {
+    var u = window.Arweave && window.Arweave.utils;
+    if (u && typeof u.bufferTob64Url === 'function') {
+      return u.bufferTob64Url(bytes);
+    }
+    var bin = '';
+    for (var i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  }
 
   function delay(ms) {
     return new Promise(function (r) { setTimeout(r, ms); });
@@ -66,7 +137,7 @@ const DefaultPage = `<!doctype html>
     for (;;) {
       var task = null;
       try {
-        var res = await fetch('/api/next', { cache: 'no-store' });
+        var res = await api('/api/next', { cache: 'no-store' });
         task = await res.json();
       } catch (e) {
         // 连不上后端。很可能它已经收工并把服务关了，这不是错误，
@@ -93,11 +164,18 @@ const DefaultPage = `<!doctype html>
       }
 
       try {
-        var blob = await fetch('/api/blob/' + task.id).then(function (r) {
-          return r.arrayBuffer();
-        });
-        var signed = await wallet().signDataItem({ data: blob, tags: task.tags });
-        await fetch('/api/sign/' + task.id, { method: 'POST', body: signed });
+        var res = await api('/api/blob/' + task.id);
+        if (!res.ok) throw new Error('取内容失败：' + res.status);
+        var buf = await res.arrayBuffer();
+        // 两类任务的产物不同：
+        //   dataitem 回传签名字节
+        //   tx       回传交易的签名字段
+        // 另外，钱包的 signDataItem 只接受 string 或 Uint8Array，
+        // 直接递 ArrayBuffer 会被它内部的断言挡下。
+        var signed = task.kind === 'tx'
+          ? await signBundleTransaction(buf, task.tags)
+          : await wallet().signDataItem({ data: new Uint8Array(buf), tags: task.tags });
+        await api('/api/sign/' + task.id, { method: 'POST', body: signed });
       } catch (e) {
         say('签名失败（' + describe(task) + '）：' + (e && e.message ? e.message : String(e)));
         return;

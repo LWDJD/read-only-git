@@ -5,7 +5,14 @@
  * 用法:
  *   node scripts/serve.mjs [根目录] [端口=4173]
  *
- *   根目录省略时取脚本旁边的 ../public，跟从哪个目录调用无关。
+ *   根目录省略时取 internal/sitekit/site —— 那是前端骨架的真身，
+ *   也是唯一该改前端代码的地方。public/ 只是产物目录，
+ *   由 rog site init 与 rog pack 生成。
+ *
+ *   想看带真实仓库的完整效果，先打一份站出来：
+ *     rog site init site
+ *     rog pack <源仓库> site <仓库名>
+ *     node scripts/serve.mjs site
  *
  * 刻意不依赖任何 npm 包：这个项目的目标是在任何静态托管上跑，
  * 本地预览也不应该需要构建工具。
@@ -21,7 +28,7 @@ import { dirname, extname, join, normalize, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const here = dirname(fileURLToPath(import.meta.url))
-const root = resolve(process.argv[2] || join(here, '..', 'public'))
+const root = resolve(process.argv[2] || join(here, '..', 'internal', 'sitekit', 'site'))
 const port = Number(process.argv[3] || 4173)
 
 const MIME = {

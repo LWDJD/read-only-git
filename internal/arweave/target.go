@@ -23,7 +23,16 @@ type Target struct {
 	Repo     string // 仓库名，写进 tags
 	Uploader *Uploader
 	Signer   Signer
-	Logf     func(format string, args ...any)
+	// TxSigner 非 nil 时走 L1：把这一轮新签的 data item 连同 manifest 打成一个
+	// ANS-104 bundle，交给钱包签成一笔交易，直接提交到节点。
+	// 与 Uploader 二选一。
+	TxSigner TxSigner
+	// Node 是提交交易用的节点地址，只在 L1 模式下用到。
+	Node string
+	// RecordPath 是发布记录在站点内的相对路径（用 / 分隔）。非空时会把记录
+	// 也传上链并写进 manifest，换机器后能靠入口取回来。
+	RecordPath string
+	Logf       func(format string, args ...any)
 }
 
 func (t *Target) Name() string { return "arweave" }
@@ -34,7 +43,8 @@ func (t *Target) Name() string { return "arweave" }
 // 调用方保存它之后，下次运行就能跳过这些文件，不会为已付费的内容再付一次。
 // 这一点比返回值语义的洁癖重要得多。
 func (t *Target) Publish(ctx context.Context, site *publish.Site, prev *publish.Record) (*publish.Record, error) {
-	if t.Uploader == nil {
+	l1 := t.TxSigner != nil
+	if !l1 && t.Uploader == nil {
 		return nil, fmt.Errorf("未配置上传器")
 	}
 	if t.Signer == nil {
@@ -52,6 +62,26 @@ func (t *Target) Publish(ctx context.Context, site *publish.Site, prev *publish.
 	// 影响 tags 的参数变了，旧引用就不能再用：内容未变的文件如果照旧复用，
 	// 会连同旧的 Repo 标签一起沿用下去，产物里就出现了两种标签共存。
 	labelsMatch := prev != nil && prev.Labels["repo"] == t.Repo
+
+	// L1 模式下这一轮新签的 data item 先攒着，最后打成一包只发一笔交易。
+	// Turbo 模式下每签完一个就直接交给上传服务，攒的东西始终为空。
+	var pending [][]byte
+
+	// deliver 把一份签好的 data item 送出去，返回它的 id。
+	//
+	// 两条路取 id 的方式不同：Turbo 由上传服务返回，L1 没有服务可问，
+	// 只能按规范从签名字段自己算，而这个 id 会进 manifest，算错就全乱。
+	deliver := func(signed []byte) (string, error) {
+		if l1 {
+			id, err := DataItemID(signed)
+			if err != nil {
+				return "", err
+			}
+			pending = append(pending, signed)
+			return id, nil
+		}
+		return t.Uploader.Upload(ctx, signed)
+	}
 
 	var uploaded, reused int
 	for _, f := range site.Files {
@@ -80,9 +110,9 @@ func (t *Target) Publish(ctx context.Context, site *publish.Site, prev *publish.
 			return rec, fmt.Errorf("签名 %s 失败: %w", f.Path, err)
 		}
 
-		id, err := t.Uploader.Upload(ctx, signed)
+		id, err := deliver(signed)
 		if err != nil {
-			return rec, fmt.Errorf("上传 %s 失败: %w", f.Path, err)
+			return rec, fmt.Errorf("提交 %s 失败: %w", f.Path, err)
 		}
 
 		rec.Files[f.Path] = f.Digest
@@ -90,9 +120,37 @@ func (t *Target) Publish(ctx context.Context, site *publish.Site, prev *publish.
 		uploaded++
 	}
 
-	// 入口：把「路径 -> data item id」固化成 manifest 再上链。
+	// 把发布记录本身也挂上链：换机器或本地文件丢了之后，靠入口就能取回
+	// 「路径 -> data item id」的映射，增量发布不必从零重传。
+	//
+	// 链上这份的 Root 只能是空的。入口 id 要等 manifest 传完才知道，
+	// 而 manifest 又得把记录文件包含进去，这里存在先后依赖。
+	// 不影响增量：复用只认 Files / Refs / Labels 三个映射。
+	paths := make(map[string]string, len(rec.Refs)+1)
+	for p, id := range rec.Refs {
+		paths[p] = id
+	}
+	if t.RecordPath != "" {
+		chainRec := *rec
+		chainRec.Root = ""
+		data, err := publish.MarshalRecord(&chainRec)
+		if err != nil {
+			return rec, err
+		}
+		signedRecord, err := t.Signer.Sign(ctx, data, RecordTags(t.Repo))
+		if err != nil {
+			return rec, fmt.Errorf("签名发布记录失败: %w", err)
+		}
+		recordID, err := deliver(signedRecord)
+		if err != nil {
+			return rec, fmt.Errorf("提交发布记录失败: %w", err)
+		}
+		paths[t.RecordPath] = recordID
+	}
+
+	// 入口：把「路径 -> data item id」固化成 manifest。
 	// 旧版本 manifest 依然可达，只是入口指向了新的这一个。
-	manifestBytes, err := NewManifest(rec.Refs, EntryPath(site)).Bytes()
+	manifestBytes, err := NewManifest(paths, EntryPath(site)).Bytes()
 	if err != nil {
 		return rec, err
 	}
@@ -102,11 +160,33 @@ func (t *Target) Publish(ctx context.Context, site *publish.Site, prev *publish.
 		return rec, fmt.Errorf("签名 manifest 失败: %w", err)
 	}
 
-	root, err := t.Uploader.Upload(ctx, signedManifest)
+	root, err := deliver(signedManifest)
 	if err != nil {
-		return rec, fmt.Errorf("上传 manifest 失败: %w", err)
+		return rec, fmt.Errorf("提交 manifest 失败: %w", err)
 	}
 	rec.Root = root
+
+	// L1：把这一轮新签的 data item 打成一包，签一笔交易发出去。
+	// 未变的文件没有进 pending，它们的 data item 还在上一笔交易里，
+	// manifest 里引用的就是那些旧 id，所以不必重复付费。
+	//
+	// 体积不再卡在 256 KiB：超过一块时 SubmitBundle 会自动走分块协议，
+	// 先报交易再逐块补。
+	if l1 {
+		bundle := Bundle(pending)
+		tags := BundleTags(t.Repo)
+		sig, err := t.TxSigner.SignTx(ctx, bundle, tags)
+		if err != nil {
+			return rec, fmt.Errorf("签名交易失败: %w", err)
+		}
+		txID, err := SubmitBundle(ctx, t.Node, bundle, tags, sig, nil, t.logf)
+		if err != nil {
+			return rec, err
+		}
+		t.logf("打成一包 %d 个 data item（%d 字节），交易 %s；复用 %d 个，入口 %s",
+			len(pending), len(bundle), txID, reused, root)
+		return rec, nil
+	}
 
 	t.logf("上传 %d 个，复用 %d 个，入口 %s", uploaded, reused, root)
 	return rec, nil

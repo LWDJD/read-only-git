@@ -95,11 +95,11 @@ func TestIsValidName(t *testing.T) {
 		{"con.txt", false},
 		{"NUL", false},
 		{"LPT9", false},
-		// 长度上限要算上 .git 后缀，并按字符而非字节判断
-		{strings.Repeat("a", 251), true},  // 251+4 = 255，刚好
-		{strings.Repeat("a", 252), false}, // 256，超
-		{strings.Repeat("中", 80), true},   // 244 字节，ext4 也放得下
-		{strings.Repeat("中", 100), false}, // 304 字节，超 ext4 的 255 字节
+		// 长度上限按目录名算（就是 name 本身），并按字符而非字节判断
+		{strings.Repeat("a", 255), true},  // 255，刚好
+		{strings.Repeat("a", 256), false}, // 256，超
+		{strings.Repeat("中", 80), true},   // 240 字节，ext4 也放得下
+		{strings.Repeat("中", 100), false}, // 300 字节，超 ext4 的 255 字节
 	}
 	for _, c := range cases {
 		if got := isValidName(c.in); got != c.want {

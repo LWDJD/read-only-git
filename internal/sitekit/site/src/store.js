@@ -5,7 +5,7 @@ import { RemoteRepo } from './git/repo.js'
  *
  * 之所以要这个小文件：静态托管没有目录列表 API，而 manifest / IPFS /
  * Pages / EdgeOne 都无法告诉你"这个目录下有什么"。用一份清单换取跨平台
- * 通用性，代价是新增仓库时要更新它（prepare-repo 脚本会自动维护）。
+ * 通用性，代价是新增仓库时要更新它（rog pack 会自动维护）。
  */
 
 const repoCache = new Map()
@@ -69,8 +69,17 @@ export function isValidRepoName(name) {
   return n !== '' && n !== '.' && n !== '..' && !/[/\\]/.test(n)
 }
 
+/**
+ * 仓库的 base URL。
+ *
+ * 不加 .git 后缀：git 对 URL 后缀没要求，dumb 协议只往 base 后面拼
+ * info/refs 这类固定路径，目录叫什么都能 clone。而 .git 会被一些网关拦掉，
+ * 比如 eth.limo。既然两种写法等价，就用不会被拦的那种。
+ *
+ * 仍然过一道 stripGitSuffix：仓库名可能被人手动写成带后缀的形式。
+ */
 export function repoBaseUrl(name) {
-  return new URL(`${stripGitSuffix(name)}.git/`, document.baseURI).href
+  return new URL(`${stripGitSuffix(name)}/`, document.baseURI).href
 }
 
 export function openRepo(name, { onProgress } = {}) {

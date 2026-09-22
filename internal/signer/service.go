@@ -15,6 +15,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -22,10 +23,19 @@ import (
 )
 
 // Request 是一次待签名任务，页面从 /api/next 拿到它。
+//
+// Kind 告诉页面这次要做什么：给 data item 签个名，还是给一笔交易签个名。
 type Request struct {
 	ID   string        `json:"id"`
+	Kind string        `json:"kind,omitempty"`
 	Tags []arweave.Tag `json:"tags"`
 }
+
+// 任务类型。dataitem 回传签名字节，tx 回传一笔交易的字段。
+const (
+	KindDataItem = "dataitem"
+	KindTx       = "tx"
+)
 
 // Service 是本机签名服务。
 type Service struct {
@@ -33,12 +43,14 @@ type Service struct {
 	items    map[string]*item
 	order    []string
 	page     []byte
+	token    string
 	listener net.Listener
 	server   *http.Server
 }
 
 type item struct {
 	id       string
+	kind     string
 	data     []byte
 	tags     []arweave.Tag
 	result   chan []byte
@@ -50,7 +62,20 @@ func New(page []byte) *Service {
 	return &Service{
 		items: make(map[string]*item),
 		page:  page,
+		token: newToken(),
 	}
+}
+
+// newToken 生成一个随机的会话 token，方式与 webui 那边一致。
+//
+// 两处各自实现一份而不共用一个内部包：它只有十行，
+// 为此把两个不相干的包绁在一起不划算。
+func newToken() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return strconv.FormatInt(time.Now().UnixNano(), 16)
+	}
+	return hex.EncodeToString(b[:])
 }
 
 // Start 在 127.0.0.1 的随机端口上开始监听。
@@ -65,10 +90,17 @@ func (s *Service) Start() error {
 	s.listener = ln
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/", s.handlePage)
-	mux.HandleFunc("/api/next", s.handleNext)
-	mux.HandleFunc("/api/blob/", s.handleBlob)
-	mux.HandleFunc("/api/sign/", s.handleSign)
+	mux.HandleFunc("/", s.guard(s.handlePage))
+	mux.HandleFunc("/api/next", s.guard(s.handleNext))
+	mux.HandleFunc("/api/blob/", s.guard(s.handleBlob))
+	mux.HandleFunc("/api/sign/", s.guard(s.handleSign))
+	// arweave-js 的浏览器构建随页面一起发，内嵌而不是走 CDN：
+	// 签名页在本机跑，不该依赖外网才能工作。
+	//
+	// 它不套 token：是公开的第三方库，不含任何与本机状态有关的东西，
+	// 而且 <script src> 带不了请求头。
+	mux.HandleFunc("/vendor/arweave.js", s.handleVendor(arweaveBundle, "text/javascript; charset=utf-8"))
+	mux.HandleFunc("/vendor/arweave-LICENSE.txt", s.handleVendor(arweaveLicense, "text/plain; charset=utf-8"))
 
 	s.server = &http.Server{
 		Handler:           mux,
@@ -78,12 +110,46 @@ func (s *Service) Start() error {
 	return nil
 }
 
-// URL 返回签名页的地址，供用户打开。
+// URL 返回签名页的地址，带上访问 token。
 func (s *Service) URL() string {
 	if s.listener == nil {
 		return ""
 	}
+	return s.baseURL() + "?token=" + s.token
+}
+
+// baseURL 返回不含 token 的根地址（带尾斜杠），供内部与测试拼接路径。
+func (s *Service) baseURL() string {
+	if s.listener == nil {
+		return ""
+	}
 	return "http://" + s.listener.Addr().String() + "/"
+}
+
+// Token 返回本次会话的访问 token。
+func (s *Service) Token() string { return s.token }
+
+// guard 给处理器套上 token 校验。
+//
+// 这个端点会把待上链的内容原样吐出来，比 webui 那边更要紧：
+// 光绑回环还不够，同机的任意网页都能向它发请求。
+func (s *Service) guard(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !s.tokenOK(r) {
+			http.Error(w, "缺少或错误的 token，请用启动时打印的地址访问", http.StatusForbidden)
+			return
+		}
+		next(w, r)
+	}
+}
+
+// tokenOK 接受两种带法：header 给普通请求，query 是给 EventSource 一类
+// 无法自定义请求头的场合留的。
+func (s *Service) tokenOK(r *http.Request) bool {
+	if r.Header.Get("X-Rog-Token") == s.token {
+		return true
+	}
+	return r.URL.Query().Get("token") == s.token
 }
 
 // Close 关掉服务。
@@ -98,8 +164,37 @@ func (s *Service) Close() error {
 
 // Sign 实现 arweave.Signer：把内容排进待签队列，等页面把结果送回来。
 func (s *Service) Sign(ctx context.Context, data []byte, tags []arweave.Tag) ([]byte, error) {
+	return s.enqueue(ctx, KindDataItem, data, tags)
+}
+
+// SignTx 实现 arweave.TxSigner：让钱包给一笔「data 就是这个数据」的交易签名。
+//
+// 页面回传的是交易字段而不是整笔交易：data 可能是整个 bundle，回传它要多走
+// 一次 base64，而那串字节 Go 这边本来就有，自己拼更省。
+func (s *Service) SignTx(ctx context.Context, data []byte, tags []arweave.Tag) (*arweave.TxSignature, error) {
+	raw, err := s.enqueue(ctx, KindTx, data, tags)
+	if err != nil {
+		return nil, err
+	}
+	var sig arweave.TxSignature
+	if err := json.Unmarshal(raw, &sig); err != nil {
+		return nil, fmt.Errorf("钱包回传的交易字段无法解析: %w", err)
+	}
+	if sig.ID == "" || sig.Owner == "" || sig.Signature == "" {
+		return nil, fmt.Errorf("钱包回传的交易字段不完整（缺 id / owner / signature）")
+	}
+	// data_root 同样不能缺：签名算的就是它，交易 JSON 里要用。
+	if sig.DataRoot == "" {
+		return nil, fmt.Errorf("钱包回传的交易字段不完整（缺 data_root）")
+	}
+	return &sig, nil
+}
+
+// enqueue 把一次签名任务排进队列，并等页面把结果送回来。
+func (s *Service) enqueue(ctx context.Context, kind string, data []byte, tags []arweave.Tag) ([]byte, error) {
 	it := &item{
 		id:     newID(),
+		kind:   kind,
 		data:   data,
 		tags:   tags,
 		result: make(chan []byte, 1),
@@ -136,6 +231,14 @@ func (s *Service) Pending() int {
 
 // ---------- HTTP ----------
 
+// handleVendor 提供内嵌的静态资源。
+func (s *Service) handleVendor(body []byte, contentType string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", contentType)
+		_, _ = w.Write(body)
+	}
+}
+
 func (s *Service) handlePage(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
 		http.NotFound(w, r)
@@ -161,7 +264,7 @@ func (s *Service) handleNext(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, Request{})
 		return
 	}
-	writeJSON(w, Request{ID: next.id, Tags: next.tags})
+	writeJSON(w, Request{ID: next.id, Kind: next.kind, Tags: next.tags})
 }
 
 func (s *Service) handleBlob(w http.ResponseWriter, r *http.Request) {
