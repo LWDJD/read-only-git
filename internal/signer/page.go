@@ -57,13 +57,14 @@ const DefaultPage = `<!doctype html>
   function wallet() { return window.arweaveWallet; }
 
   /**
-   * 让钱包给一笔「data 就是这一整包」的交易签名。
+   * 让钱包签一笔「data 就是这一整包」的交易，然后自己提交上链。
    *
-   * arweave-js 在这里只做两件事：构造交易（算 data_root、reward、last_tx），
-   * 以及把交易交给钱包签。签完只回传字段，包体不动，
-   * 免得整份内容再多走一趟 base64。
+   * 为什么提交也放在这里：署名用的对象与提交出去的对象是同一个，
+   * 就不存在「两处各自拼出来的交易 JSON 是否等价」这个问题。
+   * 中间那一次 verify 也是这个用意：先把「签名本身对不对」
+   * 与「提交环节对不对」分开，出错时才能知道是哪一头。
    */
-  async function signBundleTransaction(buf, tags) {
+  async function signAndUploadBundle(buf, tags) {
     if (!window.Arweave) throw new Error('arweave-js 没加载出来');
     var arweave = window.Arweave.init({ host: 'arweave.net', port: 443, protocol: 'https' });
     var tx = await arweave.createTransaction({ data: new Uint8Array(buf) });
@@ -74,30 +75,17 @@ const DefaultPage = `<!doctype html>
     // 省略 JWK 参数时 arweave-js 会走注入的钱包
     await arweave.transactions.sign(tx);
 
-    // proofs 供 Go 侧走分块上传。超过一块时交易 JSON 不带 data，
-    // 由 Go 按同样的切法逐块发 /chunk。
-    // 不回传块内容本身：那等于把整包再传一遍。
-    var chunkProofs = [];
-    var proofList = (tx.chunks && tx.chunks.proofs) || [];
-    for (var k = 0; k < proofList.length; k++) {
-      chunkProofs.push({
-        data_path: toB64Url(proofList[k].proof),
-        offset: String(proofList[k].offset),
-      });
+    // 自验：签名与签名输入对不对得上。不过就说明钱包给的东西有问题。
+    var ok = false;
+    try { ok = await arweave.transactions.verify(tx); } catch (e) { ok = false; }
+    if (!ok) {
+      throw new Error('签名自验没过：钱包返回的 owner / signature 与这笔交易的签名输入对不上');
     }
 
-    return JSON.stringify({
-      id: tx.id,
-      owner: tx.owner,
-      signature: tx.signature,
-      reward: tx.reward,
-      last_tx: tx.last_tx,
-      // data_root 是签名内容的一部分，Go 侧要拿它拼交易 JSON。
-      // 交易 JSON 里漏了这个字段，签名就不再自洽，节点会拒。
-      data_root: tx.data_root,
-      data_size: tx.data_size,
-      proofs: chunkProofs,
-    });
+    // 自己传。upload 会按块数自动选路。
+    await arweave.transactions.upload(tx);
+
+    return JSON.stringify({ id: tx.id, uploaded: true });
   }
 
   /**
@@ -173,7 +161,7 @@ const DefaultPage = `<!doctype html>
         // 另外，钱包的 signDataItem 只接受 string 或 Uint8Array，
         // 直接递 ArrayBuffer 会被它内部的断言挡下。
         var signed = task.kind === 'tx'
-          ? await signBundleTransaction(buf, task.tags)
+          ? await signAndUploadBundle(buf, task.tags)
           : await wallet().signDataItem({ data: new Uint8Array(buf), tags: task.tags });
         await api('/api/sign/' + task.id, { method: 'POST', body: signed });
       } catch (e) {

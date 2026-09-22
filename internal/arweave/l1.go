@@ -60,6 +60,12 @@ type TxSignature struct {
 	// Proofs 是各块的 Merkle 证明，按块序排列，只在需要分块时用得上。
 	// 单块时 /tx 直接带 data，节点自己会算，用不着它。
 	Proofs []ChunkProof `json:"proofs,omitempty"`
+	// Uploaded 表示这份交易已经由签名页自己提交上链了。
+	//
+	// 署名与提交在同一边完成时，就不存在「两处拼出来的 JSON 是否等价」
+	// 这个问题——这也正是把提交交给 arweave-js 的理由。
+	// 为 true 时 Go 侧不重复提交，直接用 ID。
+	Uploaded bool `json:"uploaded,omitempty"`
 }
 
 // TxSigner 是交易签名通道：把 bundle 与 tags 交给钱包，拿回交易的签名字段。

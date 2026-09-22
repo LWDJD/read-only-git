@@ -51,6 +51,11 @@ func (t *Target) Name() string { return "arweave" }
 // 出错时返回「部分完成的记录」而不是 nil：已经上传成功的文件在里面有 id，
 // 调用方保存它之后，下次运行就能跳过这些文件，不会为已付费的内容再付一次。
 // 这一点比返回值语义的洁癖重要得多。
+//
+// 但「上传成功」在两条路上含义不同：Turbo 的 Upload 返回 id 就是真的传上去了；
+// L1 的 id 只是本地算出来的，代表「已打进 bundle 待提交」。
+// 所以 L1 下多一道 defer：只要最后那笔交易没提交成功，
+// 本轮新签的那些引用就全部撤掉，不管是从哪一步退出去的。
 func (t *Target) Publish(ctx context.Context, site *publish.Site, prev *publish.Record) (*publish.Record, error) {
 	l1 := t.TxSigner != nil
 	if !l1 && t.Uploader == nil {
@@ -76,21 +81,53 @@ func (t *Target) Publish(ctx context.Context, site *publish.Site, prev *publish.
 	// Turbo 模式下每签完一个就直接交给上传服务，攒的东西始终为空。
 	var pending [][]byte
 
+	// fresh 记下本轮新签、还没上链的路径。
+	//
+	// 这是 L1 特有的一件事：Turbo 那边 Upload 返回 id 就等于确实传上去了，
+	// 而 L1 的 id 只是本地算出来的，代表「已打进 bundle 待提交」。
+	// 那笔交易一旦提交失败，这些 id 在链上并不存在，
+	// 必须从记录里撤掉——否则下次发布会以为它们已经上链而跳过，
+	// 结果是站点里只剩一份清单、没有实际内容。
+	var fresh []string
+
 	// deliver 把一份签好的 data item 送出去，返回它的 id。
 	//
 	// 两条路取 id 的方式不同：Turbo 由上传服务返回，L1 没有服务可问，
 	// 只能按规范从签名字段自己算，而这个 id 会进 manifest，算错就全乱。
-	deliver := func(signed []byte) (string, error) {
+	// name 用于 L1 下登记「这份还没上链」，空串表示不登记（如 manifest）。
+	deliver := func(name string, signed []byte) (string, error) {
 		if l1 {
 			id, err := DataItemID(signed)
 			if err != nil {
 				return "", err
 			}
 			pending = append(pending, signed)
+			if name != "" {
+				fresh = append(fresh, name)
+			}
 			return id, nil
 		}
 		return t.Uploader.Upload(ctx, signed)
 	}
+
+	// L1 下不管从哪一步退出去，只要最后那笔交易没提交成功，
+	// 本轮新签的引用就都是无效的。
+	//
+	// 只写在「提交失败」那一条分支上不够：签名、算 id 都可能中途出错，
+	// 那些已经记进 rec 的引用同样没上链。实际就撞上过这种情况——
+	// 一个文件卡在签名上，前面几个的引用留了下来，下次发布就把它们跳过了。
+	submitted := false
+	defer func() {
+		if !l1 || submitted {
+			return
+		}
+		for _, p := range fresh {
+			delete(rec.Refs, p)
+			delete(rec.Files, p)
+		}
+		// 入口指向的 manifest 同样没上链，不能留下这个根。
+		rec.Root = ""
+	}()
 
 	var uploaded, reused int
 	for _, f := range site.Files {
@@ -119,7 +156,7 @@ func (t *Target) Publish(ctx context.Context, site *publish.Site, prev *publish.
 			return rec, fmt.Errorf("签名 %s 失败: %w", f.Path, err)
 		}
 
-		id, err := deliver(signed)
+		id, err := deliver(f.Path, signed)
 		if err != nil {
 			return rec, fmt.Errorf("提交 %s 失败: %w", f.Path, err)
 		}
@@ -150,7 +187,7 @@ func (t *Target) Publish(ctx context.Context, site *publish.Site, prev *publish.
 		if err != nil {
 			return rec, fmt.Errorf("签名发布记录失败: %w", err)
 		}
-		recordID, err := deliver(signedRecord)
+		recordID, err := deliver(t.RecordPath, signedRecord)
 		if err != nil {
 			return rec, fmt.Errorf("提交发布记录失败: %w", err)
 		}
@@ -169,7 +206,7 @@ func (t *Target) Publish(ctx context.Context, site *publish.Site, prev *publish.
 		return rec, fmt.Errorf("签名 manifest 失败: %w", err)
 	}
 
-	root, err := deliver(signedManifest)
+	root, err := deliver("", signedManifest)
 	if err != nil {
 		return rec, fmt.Errorf("提交 manifest 失败: %w", err)
 	}
@@ -182,7 +219,11 @@ func (t *Target) Publish(ctx context.Context, site *publish.Site, prev *publish.
 	// 体积不再卡在 256 KiB：超过一块时 SubmitBundle 会自动走分块协议，
 	// 先报交易再逐块补。
 	if l1 {
-		return rec, t.submitL1(ctx, pending, root, reused)
+		if err := t.submitL1(ctx, pending, root, reused); err != nil {
+			return rec, err
+		}
+		submitted = true
+		return rec, nil
 	}
 
 	t.logf("上传 %d 个，复用 %d 个，入口 %s", uploaded, reused, root)
@@ -217,6 +258,14 @@ func (t *Target) submitL1(ctx context.Context, pending [][]byte, root string, re
 		return fmt.Errorf("签名交易失败: %w", err)
 	}
 
+	// 页面已经提交过了，直接用它的 ID。
+	if sig.Uploaded {
+		t.logf("交易 %s（已在页面里提交）", sig.ID)
+		ClearPending(t.PendingPath)
+		return nil
+	}
+
+	// 兑底：页面拿不到节点（或旧版页面只回传字段）时，走 Go 自己的提交。
 	// 签好就先落盘：万一提交失败，下一次就能直接重传。
 	// 落盘失败只提醒一句，不拦住发布——顶多是重试时要再签一次。
 	if err := SavePending(t.PendingPath, bundle, tags, sig); err != nil {

@@ -14,12 +14,12 @@ import (
 // Transaction verification failed 这类错时，用它定位「我们发出去的 JSON
 // 与钱包签名时的那一份是否等价」。
 //
-//       # 1. 生成基准（arweave-js 真签的一笔）
-//       ARWEAVE_JS_PATH=<包目录> node scripts/arjs-sign-base.cjs base.json
-//       # 2. 让 Go 拼一份
-//       ARJS_SIGNED=base.json ARJS_OUTDIR=. go test -run TestZZProbe ./internal/arweave/
-//       # 3. 比对签名输入
-//       node <临时目录>/compare.cjs base.json go-tx.json
+//	# 1. 生成基准（arweave-js 真签的一笔）
+//	ARWEAVE_JS_PATH=<包目录> node scripts/arjs-sign-base.cjs base.json
+//	# 2. 让 Go 拼一份
+//	ARJS_SIGNED=base.json ARJS_OUTDIR=. go test -run TestZZProbe ./internal/arweave/
+//	# 3. 比对签名输入
+//	node <临时目录>/compare.cjs base.json go-tx.json
 //
 // 日常的自动化对拍由 txpayload_crosscheck_test.go 负责，它直接读
 // testdata/arjs-signed.json，不需要这一步。

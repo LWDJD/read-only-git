@@ -200,8 +200,16 @@ func (s *Service) SignTx(ctx context.Context, data []byte, tags []arweave.Tag) (
 	if err := json.Unmarshal(raw, &sig); err != nil {
 		return nil, fmt.Errorf("钱包回传的交易字段无法解析: %w", err)
 	}
-	if sig.ID == "" || sig.Owner == "" || sig.Signature == "" {
-		return nil, fmt.Errorf("钱包回传的交易字段不完整（缺 id / owner / signature）")
+	if sig.ID == "" {
+		return nil, fmt.Errorf("钱包回传的交易字段不完整（缺 id）")
+	}
+	// 页面自己把交易提交上去时，只需要一个 ID：
+	// 署名与提交都不在 Go 这边，也就不必要求它把签名字段一并回传。
+	if sig.Uploaded {
+		return &sig, nil
+	}
+	if sig.Owner == "" || sig.Signature == "" {
+		return nil, fmt.Errorf("钱包回传的交易字段不完整（缺 owner / signature）")
 	}
 	// data_root 同样不能缺：签名算的就是它，交易 JSON 里要用。
 	if sig.DataRoot == "" {
