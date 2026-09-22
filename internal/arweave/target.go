@@ -37,7 +37,11 @@ type Target struct {
 	// 为空时按系统代理造一个。发布失败十有八九出在这里，
 	// 所以它必须是可配的，而不是隐式用标准库默认值。
 	Client *http.Client
-	Logf   func(format string, args ...any)
+	// PendingPath 是「已签名未提交」的交易落盘位置。
+	//
+	// 有它，提交失败后的重试才能跳过钱包那一步。为空则不落盘。
+	PendingPath string
+	Logf        func(format string, args ...any)
 }
 
 func (t *Target) Name() string { return "arweave" }
@@ -178,24 +182,57 @@ func (t *Target) Publish(ctx context.Context, site *publish.Site, prev *publish.
 	// 体积不再卡在 256 KiB：超过一块时 SubmitBundle 会自动走分块协议，
 	// 先报交易再逐块补。
 	if l1 {
-		bundle := Bundle(pending)
-		tags := BundleTags(t.Repo)
-		sig, err := t.TxSigner.SignTx(ctx, bundle, tags)
-		if err != nil {
-			return rec, fmt.Errorf("签名交易失败: %w", err)
-		}
-		// client 传 t.Client：没配时 SubmitBundle 内部会按系统代理兑底。
-		txID, err := SubmitBundle(ctx, t.Node, bundle, tags, sig, t.Client, t.logf)
-		if err != nil {
-			return rec, err
-		}
-		t.logf("打成一包 %d 个 data item（%d 字节），交易 %s；复用 %d 个，入口 %s",
-			len(pending), len(bundle), txID, reused, root)
-		return rec, nil
+		return rec, t.submitL1(ctx, pending, root, reused)
 	}
 
 	t.logf("上传 %d 个，复用 %d 个，入口 %s", uploaded, reused, root)
 	return rec, nil
+}
+
+// submitL1 走 L1 的收尾：签一笔以整包为 data 的交易，提交到节点。
+//
+// 这里面有一件事值得单独说：签名结果会先落到 PendingPath，提交成功再删。
+// 签名是用户在钱包里点过确认的动作，一次网络失败不该让它作废；
+// 留着它，下一次发布就能直接重传，不必再让人去钱包里点一遍。
+//
+// 抽成独立方法是为了能被单独测：直接走 Publish 会连带签一大堆 data item。
+func (t *Target) submitL1(ctx context.Context, pending [][]byte, root string, reused int) error {
+	bundle := Bundle(pending)
+	tags := BundleTags(t.Repo)
+
+	// 先看有没有上次签好但没提交成功的交易。包体没变，说明这份签名仍然对得上。
+	if p := LoadPending(t.PendingPath); p.SameBundle(bundle) {
+		t.logf("复用上次签好的交易（%d 字节），不必再签一次", len(bundle))
+		txID, err := SubmitBundle(ctx, t.Node, p.Bundle, p.Tags, p.Sig, t.Client, t.logf)
+		if err != nil {
+			return err
+		}
+		ClearPending(t.PendingPath)
+		t.logf("交易 %s；复用 %d 个，入口 %s", txID, reused, root)
+		return nil
+	}
+
+	sig, err := t.TxSigner.SignTx(ctx, bundle, tags)
+	if err != nil {
+		return fmt.Errorf("签名交易失败: %w", err)
+	}
+
+	// 签好就先落盘：万一提交失败，下一次就能直接重传。
+	// 落盘失败只提醒一句，不拦住发布——顶多是重试时要再签一次。
+	if err := SavePending(t.PendingPath, bundle, tags, sig); err != nil {
+		t.logf("! 待提交交易落盘失败，重试时需要重新签名: %v", err)
+	}
+
+	// client 传 t.Client：没配时 SubmitBundle 内部会按系统代理兑底。
+	txID, err := SubmitBundle(ctx, t.Node, bundle, tags, sig, t.Client, t.logf)
+	if err != nil {
+		return err
+	}
+	ClearPending(t.PendingPath)
+
+	t.logf("打成一包 %d 个 data item（%d 字节），交易 %s；复用 %d 个，入口 %s",
+		len(pending), len(bundle), txID, reused, root)
+	return nil
 }
 
 // EntryPath 返回默认入口路径，通常是站点根下的 index.html。
