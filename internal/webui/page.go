@@ -177,10 +177,9 @@ const DefaultPage = `<!doctype html>
         <label>节点</label>
         <input id="pubNode" placeholder="https://arweave.net">
       </div>
-      <label>仓库名（Repo 标签 / 记录身份）</label>
-      <input id="pubRepo" placeholder="myrepo">
       <label>从链上恢复（可选，填入口 id）</label>
       <input id="pubFrom" placeholder="re22tX-…">
+      <p class="muted" style="margin:0">仓库名取站点目录名，不用填。</p>
       <button class="primary" id="doPublish">开始发布</button>
     </section>
 
@@ -460,7 +459,6 @@ const DefaultPage = `<!doctype html>
       dest: el('pubDest').value.trim(),
       endpoint: el('pubEndpoint').value.trim(),
       node: el('pubNode').value.trim(),
-      repo: el('pubRepo').value.trim(),
       from: el('pubFrom').value.trim(),
     }, '发布到 ' + activeTarget);
   };

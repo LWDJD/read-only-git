@@ -298,11 +298,21 @@ func (s *Server) handlePack(w http.ResponseWriter, r *http.Request) {
 
 // ---------- 发布 ----------
 
+// repoNameFor 从站点目录名推出仓库名。
+//
+// 界面上不再提供这一栏。一个站点对应一个仓库，站点目录名就是它的名字：
+// 让它可填只会多一个能填错的地方，而填错的代价是产物里的 Repo 标签
+// 与发布记录的身份一起错，这两样都不该由人在界面上临时决定。
+//
+// CLI 那边仍可用 --repo 显式覆盖，那是脚本场景，不是随手填。
+func repoNameFor(siteRoot string) string {
+	return filepath.Base(filepath.Clean(siteRoot))
+}
+
 type publishRequest struct {
 	Site     string `json:"site"`
 	Target   string `json:"target"` // local / turbo / l1
 	Dest     string `json:"dest"`   // local 用
-	Repo     string `json:"repo"`
 	Endpoint string `json:"endpoint"`
 	Node     string `json:"node"`
 	From     string `json:"from"`
@@ -391,10 +401,7 @@ func (s *Server) publishLocal(t *Task, site *publish.Site, req publishRequest) e
 }
 
 func (s *Server) publishArweave(t *Task, site *publish.Site, req publishRequest, useL1 bool) error {
-	repo := req.Repo
-	if strings.TrimSpace(repo) == "" {
-		repo = filepath.Base(site.Root)
-	}
+	repo := repoNameFor(site.Root)
 
 	svc := signer.New([]byte(signer.DefaultPage))
 	if err := svc.Start(); err != nil {

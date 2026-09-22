@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -511,5 +512,112 @@ func TestSiteInitKeepsExistingByDefault(t *testing.T) {
 	}
 	if string(got) != "我改过的" {
 		t.Fatal("默认不该覆盖已存在的文件")
+	}
+}
+
+// 发布面板不再提供「仓库名」这一栏：一个站点一个仓库，名字由目录名决定。
+//
+// 这一条挡的是「有人手滑把它加回来」。那个输入框的代价不是多一个字段，
+// 而是产物里的 Repo 标签与发布记录的身份可能被填成别的东西。
+func TestPageHasNoRepoField(t *testing.T) {
+	srv := newTestServer(t, t.TempDir())
+
+	req, err := http.NewRequest(http.MethodGet, srv.baseURL(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Rog-Token", testToken)
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+
+	page, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(page, []byte("pubRepo")) {
+		t.Fatal("发布面板不该再出现仓库名输入框")
+	}
+	if !bytes.Contains(page, []byte("仓库名取站点目录名")) {
+		t.Fatal("应当有一句说明告诉用户名字从哪来")
+	}
+}
+
+// 仓库名从站点目录名推导，尾随分隔符要先规整掉。
+func TestRepoNameFor(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{`D:\Project\web\rog`, "rog"},
+		{`D:\Project\web\rog\`, "rog"},
+		{"/home/me/site", "site"},
+		{"/home/me/site/", "site"},
+		{"site", "site"},
+	}
+	for _, c := range cases {
+		if got := repoNameFor(c.in); got != c.want {
+			t.Errorf("repoNameFor(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// 发布面板的完整闭环：点一次发布，产物落到目标目录，记录也写进站点。
+//
+// 走 local 目标：不碰网络也不碰钱包，但会把「扫描站点 → 逐个文件写出 →
+// 写发布记录」这条链路完整走一遍。这类界面改动最实在的回归网就是它。
+func TestPublishLocalEndToEnd(t *testing.T) {
+	site := t.TempDir()
+	if err := os.WriteFile(filepath.Join(site, "index.html"), []byte("<h1>hi</h1>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(site, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(site, "src", "a.js"), []byte("console.log(1)"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	dest := t.TempDir()
+	srv := newTestServer(t, site)
+
+	code, out := postJSON(t, srv.baseURL()+"api/publish", map[string]any{
+		"site": site, "target": "local", "dest": dest,
+	})
+	if code != http.StatusOK {
+		t.Fatalf("建任务应当返回 200，实际 %d", code)
+	}
+	taskID, _ := out["taskId"].(string)
+
+	var snap map[string]any
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		getJSON(t, srv.baseURL()+"api/task/"+taskID, &snap)
+		if snap["status"] != "running" {
+			break
+		}
+		time.Sleep(30 * time.Millisecond)
+	}
+	if snap["status"] != "done" {
+		t.Fatalf("发布应当成功，实际 %v：%v", snap["status"], snap["error"])
+	}
+
+	// 产物按路径落位
+	for _, rel := range []string{"index.html", filepath.Join("src", "a.js")} {
+		got, err := os.ReadFile(filepath.Join(dest, rel))
+		if err != nil {
+			t.Fatalf("%s 没被写出来: %v", rel, err)
+		}
+		if len(got) == 0 {
+			t.Fatalf("%s 是空的", rel)
+		}
+	}
+
+	// 发布记录要落在站点里的 .rog 下，下次才能做增量
+	entries, err := os.ReadDir(filepath.Join(site, publish.StateDir))
+	if err != nil {
+		t.Fatalf("站点里应当有发布记录目录: %v", err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("发布记录目录是空的")
 	}
 }
