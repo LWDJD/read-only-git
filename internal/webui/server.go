@@ -94,6 +94,8 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/api/restore", s.guard(s.handleRestore))
 	mux.HandleFunc("/api/files/replace", s.guard(s.handleFileReplace))
 	mux.HandleFunc("/api/files/delete", s.guard(s.handleFileDelete))
+	mux.HandleFunc("/api/files/copy", s.guard(s.handleFileCopy))
+	mux.HandleFunc("/api/files/mkdir", s.guard(s.handleFileMkdir))
 	mux.HandleFunc("/api/task/", s.guard(s.handleTask))
 
 	// 签名端点挂在 /sign/ 下。StripPrefix 之后，请求路径与 signer 自己的

@@ -596,6 +596,154 @@ func TestPackAcceptsRebuildFlag(t *testing.T) {
 // b64 把一小段文本编成接口要的 base64。
 func b64(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
 
+// 删目录要递归，不能只能删空目录。
+func TestDeleteDirectoryRecursively(t *testing.T) {
+	site := t.TempDir()
+	deep := filepath.Join(site, "dir", "sub")
+	if err := os.MkdirAll(deep, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(deep, "x.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := newTestServer(t, site)
+	code, out := postJSON(t, srv.baseURL()+"api/files/delete", map[string]any{
+		"site": site, "path": "dir",
+	})
+	if code != http.StatusOK {
+		t.Fatalf("删目录应当成功，实际 %d %+v", code, out)
+	}
+	if _, err := os.Stat(filepath.Join(site, "dir")); !os.IsNotExist(err) {
+		t.Fatal("目录应当连同里面的东西一起消失")
+	}
+}
+
+// 站点根不能删：那一下会把整个站点连同 .rog 一起清掉。
+func TestDeleteRejectsSiteRoot(t *testing.T) {
+	site := t.TempDir()
+	if err := os.WriteFile(filepath.Join(site, "a.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv := newTestServer(t, site)
+
+	for _, p := range []string{".", "", "sub/.."} {
+		code, _ := postJSON(t, srv.baseURL()+"api/files/delete", map[string]any{
+			"site": site, "path": p,
+		})
+		if code == http.StatusOK {
+			t.Fatalf("路径 %q 不该被允许删除", p)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(site, "a.txt")); err != nil {
+		t.Fatal("站点内容不该被动过")
+	}
+}
+
+// 复制文件与目录。
+func TestCopyFileAndDirectory(t *testing.T) {
+	site := t.TempDir()
+	if err := os.WriteFile(filepath.Join(site, "a.txt"), []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sub := filepath.Join(site, "pkg")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "b.txt"), []byte("world"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := newTestServer(t, site)
+
+	// 先建个目标目录，把东西复制进去
+	if code, _ := postJSON(t, srv.baseURL()+"api/files/mkdir", map[string]any{
+		"site": site, "path": "dest",
+	}); code != http.StatusOK {
+		t.Fatalf("建目录失败，实际 %d", code)
+	}
+
+	code, out := postJSON(t, srv.baseURL()+"api/files/copy", map[string]any{
+		"site": site, "from": []string{"a.txt", "pkg"}, "to": "dest",
+	})
+	if code != http.StatusOK {
+		t.Fatalf("复制应当成功，实际 %d %+v", code, out)
+	}
+
+	results, _ := out["results"].([]any)
+	if len(results) != 2 {
+		t.Fatalf("应当逐个报告结果，实际 %+v", out)
+	}
+	for _, r := range results {
+		if m, _ := r.(map[string]any); m["error"] != nil && m["error"] != "" {
+			t.Fatalf("复制出错: %+v", m)
+		}
+	}
+
+	for _, rel := range []string{"dest/a.txt", "dest/pkg/b.txt"} {
+		got, err := os.ReadFile(filepath.Join(site, filepath.FromSlash(rel)))
+		if err != nil {
+			t.Fatalf("%s 没被复制出来: %v", rel, err)
+		}
+		if len(got) == 0 {
+			t.Fatalf("%s 是空的", rel)
+		}
+	}
+
+	// 源还在（复制、不是移动）
+	if _, err := os.Stat(filepath.Join(site, "a.txt")); err != nil {
+		t.Fatal("复制之后源应当还在")
+	}
+}
+
+// 不能把目录复制进它自己的子目录：那会无限递归。
+func TestCopyRejectsIntoItself(t *testing.T) {
+	site := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(site, "pkg", "inner"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(site, "pkg", "b.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := newTestServer(t, site)
+	code, out := postJSON(t, srv.baseURL()+"api/files/copy", map[string]any{
+		"site": site, "from": []string{"pkg"}, "to": "pkg/inner",
+	})
+	if code != http.StatusOK {
+		t.Fatalf("批量接口应当整体返回 200，实际 %d", code)
+	}
+	results, _ := out["results"].([]any)
+	if len(results) != 1 {
+		t.Fatalf("应当报告一条结果，实际 %+v", out)
+	}
+	first, _ := results[0].(map[string]any)
+	if msg, _ := first["error"].(string); msg == "" {
+		t.Fatal("把目录复制进自己里面应当被拒")
+	}
+
+	// 别真的递归出一堆东西来
+	if _, err := os.Stat(filepath.Join(site, "pkg", "inner", "pkg")); err == nil {
+		t.Fatal("不该真的复制进去")
+	}
+}
+
+// 新建目录支持嵌套。
+func TestMkdirCreatesNested(t *testing.T) {
+	site := t.TempDir()
+	srv := newTestServer(t, site)
+
+	code, out := postJSON(t, srv.baseURL()+"api/files/mkdir", map[string]any{
+		"site": site, "path": "a/b/c",
+	})
+	if code != http.StatusOK {
+		t.Fatalf("建目录应当成功，实际 %d %+v", code, out)
+	}
+	if info, err := os.Stat(filepath.Join(site, "a", "b", "c")); err != nil || !info.IsDir() {
+		t.Fatalf("嵌套目录没建出来: %v", err)
+	}
+}
+
 // 一轮完整的内嵌签名：发布任务排队 → 「页面」取走内容 → 回传签名 → 任务继续。
 //
 // 这是 W4 的端到端。以前签名是个独立服务，测试里得再起一个端口；
@@ -1092,11 +1240,11 @@ func TestRepoNameFor(t *testing.T) {
 	}
 }
 
-// 站点文件按目录展示：页面里应当是一个树形容器，不再是一张平铺的表。
+// 站点文件逐层浏览：一次只列一个目录，像资源管理器。
 //
-// 这是纯前端改动（后端返回的仍是扁平清单），所以只能从页面源码这一侧卡：
-// 树容器在、聚合函数在、原来那张表的 tbody 不在。
-func TestPageRendersFileTree(t *testing.T) {
+// 之前把整棵树的路径铺开，文件一多就要在长列表里找。
+// 现在页面里要有聚合「当前目录直接子项」、面包屑与进入目录的逻辑。
+func TestPageBrowsesByDirectory(t *testing.T) {
 	srv := newTestServer(t, t.TempDir())
 
 	req, err := http.NewRequest(http.MethodGet, srv.baseURL(), nil)
@@ -1114,14 +1262,86 @@ func TestPageRendersFileTree(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(page, []byte(`class="tree" id="files"`)) {
-		t.Fatal("应当有一个树形容器承载文件列表")
+	for _, want := range []string{
+		`class="tree" id="files"`,
+		"function childrenOf(",
+		"function renderCrumbs(",
+		"function enterDir(",
+	} {
+		if !bytes.Contains(page, []byte(want)) {
+			t.Fatalf("应当逐层浏览，缺少：%s", want)
+		}
 	}
-	if !bytes.Contains(page, []byte("function buildTree(")) {
-		t.Fatal("应当在页面侧把扁平清单聚成树")
+	if bytes.Contains(page, []byte("function buildTree(")) {
+		t.Fatal("不该再把整棵树铺开")
 	}
-	if bytes.Contains(page, []byte(`<tbody id="files"`)) {
-		t.Fatal("平铺的表格不该还在")
+}
+
+// 目录层级也要能删、能复制。
+//
+// 这是「轻量资源管理器」与一张文件表的区别：只有文件能操作、
+// 目录只能进去看看，整理站点就还是要回到命令行。
+func TestPageHasDirectoryActions(t *testing.T) {
+	srv := newTestServer(t, t.TempDir())
+
+	req, err := http.NewRequest(http.MethodGet, srv.baseURL(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Rog-Token", testToken)
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+
+	page, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"function actionCell(",
+		"function removeEntry(",
+		"function copySelected(",
+		"function pasteClip(",
+		"function newFolder(",
+		`id="fileUp"`,
+		`id="fileCopy"`,
+		`id="filePaste"`,
+		`id="fileMkdir"`,
+	} {
+		if !bytes.Contains(page, []byte(want)) {
+			t.Fatalf("目录与文件都该能操作，缺少：%s", want)
+		}
+	}
+}
+
+// 拖入的落点由当前目录决定，不再看拖到哪一行上。
+//
+// 真正要判断的是「重不重名」，而那件事与落点在哪一行无关。
+func TestPageDropLandsInCurrentDir(t *testing.T) {
+	srv := newTestServer(t, t.TempDir())
+
+	req, err := http.NewRequest(http.MethodGet, srv.baseURL(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Rog-Token", testToken)
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+
+	page, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(page, []byte("attachPanelDrop(el('files'), function () { return cwd; })")) {
+		t.Fatal("整个面板应当是一个拖放区，落点是当前目录")
+	}
+	if bytes.Contains(page, []byte("function attachFileDrop(")) {
+		t.Fatal("不该再有「拖到某一行就替换那一行」的逻辑")
 	}
 }
 

@@ -109,23 +109,29 @@ const DefaultPage = `<!doctype html>
   th { font-size: 12px; color: var(--muted); font-weight: 600; border-bottom-color: var(--border); }
   td.mono, .mono { font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
 
-  /* 文件树。缩进用 padding-left 表达层级，每层 14px。
-     目录行可点收起；文件行是拖拽的落点。 */
+  /* 文件面板：像资源管理器那样，一次只列一层。 */
   .tree { font-size: 13px; border-top: 1px solid var(--border); }
   .trow {
     display: flex; align-items: center; gap: 6px; padding: 3px 6px;
     border-bottom: 1px solid var(--border-soft);
   }
-  .trow.dir { cursor: pointer; user-select: none; }
-  .trow.dir:hover { background: var(--chip); }
+  .trow.dir, .trow.up { cursor: pointer; user-select: none; }
+  .trow.dir:hover, .trow.up:hover { background: var(--chip); }
+  .trow.sel { background: var(--chip); }
   .twist { width: 10px; color: var(--muted); font-size: 10px; }
   .tname { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .tname.dirname { font-weight: 600; }
   .tsize { width: 74px; text-align: right; color: var(--muted); font-size: 12px; }
   .tdigest { width: 78px; color: var(--muted); font-family: ui-monospace, Consolas, monospace; font-size: 11px; }
-  .tact { width: 56px; text-align: right; }
-  .tact button { margin: 0; padding: 2px 8px; font-size: 12px; }
-  .kids { }
+  .tact { width: 128px; text-align: right; white-space: nowrap; }
+  .tact button { margin: 0 0 0 4px; padding: 2px 8px; font-size: 12px; }
+  .tree.drop { outline: 2px dashed var(--accent); outline-offset: -2px; }
+  .crumbs { margin-bottom: 8px; font-size: 13px; line-height: 1.8; }
+  .crumbs a { text-decoration: none; }
+  .crumbs a:hover { text-decoration: underline; }
+  .filesbar { display: flex; gap: 6px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; }
+  .filesbar button { margin: 0; padding: 3px 10px; font-size: 12px; }
+  .filesbar .spacer { flex: 1; }
   tr.drop { background: var(--chip); }
   .chip {
     display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 10px;
@@ -228,7 +234,16 @@ const DefaultPage = `<!doctype html>
         <span>站点文件</span>
         <span class="muted" id="fileSummary"></span>
       </h2>
-      <p class="muted" style="margin:0 0 8px">把文件或整个目录拖进来：拖到文件行替换该文件，拖到目录行落进该目录，拖到空白处落到站点根。重名会先问一次。</p>
+      <p class="muted" style="margin:0 0 8px">像资源管理器一样逐层进入。把文件或整个目录拖进面板，就落在当前目录里；同名的会先问一次。</p>
+      <div class="filesbar">
+        <button id="fileUp">上一层</button>
+        <button id="fileCopy">复制选中</button>
+        <button id="filePaste">粘贴</button>
+        <button id="fileMkdir">新建文件夹</button>
+        <span class="spacer"></span>
+        <span class="muted" id="clipInfo"></span>
+      </div>
+      <div class="crumbs" id="crumbs"></div>
       <div class="tree" id="files"></div>
     </section>
   </div>
@@ -484,8 +499,26 @@ const DefaultPage = `<!doctype html>
       log(st.error, 'err');
     }
 
-    renderFiles(st.files || []);
-    el('fileSummary').textContent = (st.files || []).length + ' 个文件 · ' + fmtSize(st.totalSize || 0);
+    // 查重名要用当前磁盘上的路径，在这里更新，refresh 之后就准了。
+    // 沿途的目录也算「已存在」：拖入一个同名的目录时要能发现。
+    allFiles = st.files || [];
+    currentPaths = {};
+    allFiles.forEach(function (f) {
+      currentPaths[f.path] = true;
+      var parts = f.path.split('/');
+      parts.pop();
+      var acc = '';
+      parts.forEach(function (p) {
+        acc = acc ? acc + '/' + p : p;
+        currentPaths[acc] = true;
+      });
+    });
+
+    // 当前目录可能是刚被删掉的，那就退回根，不然会停在一个不存在的地方
+    if (cwd && !currentPaths[cwd]) cwd = '';
+    renderFiles();
+
+    el('fileSummary').textContent = allFiles.length + ' 个文件 · ' + fmtSize(st.totalSize || 0);
 
     var rb = el('records');
     rb.textContent = '';
@@ -500,127 +533,305 @@ const DefaultPage = `<!doctype html>
     });
   }
 
-  // 把扁平的路径清单聚成树。
+  // ---- 站点文件：逐层浏览 ----
   //
-  // 后端给的是一条条 path，层级是纯展示需求，所以在这一层聚合，
-  // 不去动后端那份「发布要用的原始数据」。
-  function buildTree(files) {
-    var root = { dirs: {}, files: [] };
+  // 一次只列一个目录，像资源管理器。之前把整棵树铺开，
+  // 文件一多就要在长列表里找，还不如一层层走。
+
+  var cwd = '';        // 当前目录（相对站点根），'' 是根
+  var allFiles = [];   // 最近一次拉到的扁平清单，用来算目录大小
+  var clip = [];       // 站点内的剪贴板
+  var selected = {};   // 被选中的路径
+
+  // childrenOf 取出某个目录的直接子项。
+  //
+  // 扁平清单里每个路径都带全部层级，这里按「当前前缀」切一层出来。
+  function childrenOf(files, dir) {
+    var prefix = dir ? dir + '/' : '';
+    var dirs = {};
+    var out = [];
+
     files.forEach(function (f) {
-      var parts = f.path.split('/');
-      var node = root;
-      for (var i = 0; i < parts.length - 1; i++) {
-        var d = parts[i];
-        if (!node.dirs[d]) node.dirs[d] = { name: d, dirs: {}, files: [] };
-        node = node.dirs[d];
+      if (prefix && f.path.indexOf(prefix) !== 0) return;
+      var rest = f.path.slice(prefix.length);
+      if (!rest) return;
+      var i = rest.indexOf('/');
+      if (i < 0) {
+        out.push({ type: 'file', name: rest, path: f.path, size: f.size, digest: f.digest });
+      } else {
+        dirs[rest.slice(0, i)] = true;
       }
-      node.files.push({ name: parts[parts.length - 1], entry: f });
     });
-    return root;
+
+    var dirList = Object.keys(dirs).sort().map(function (d) {
+      return { type: 'dir', name: d, path: prefix + d };
+    });
+    out.sort(function (a, b) { return a.name < b.name ? -1 : 1; });
+    return dirList.concat(out);
   }
 
-  function countFiles(node) {
-    var n = node.files.length;
-    Object.keys(node.dirs).forEach(function (d) { n += countFiles(node.dirs[d]); });
-    return n;
+  // dirStats 数一个目录里有多少文件、共多大。
+  function dirStats(dir) {
+    var prefix = dir + '/';
+    var n = 0, size = 0;
+    allFiles.forEach(function (f) {
+      if (f.path.indexOf(prefix) === 0) { n++; size += f.size; }
+    });
+    return { count: n, size: size };
   }
 
-  function sumSize(node) {
-    var n = 0;
-    node.files.forEach(function (f) { n += f.entry.size; });
-    Object.keys(node.dirs).forEach(function (d) { n += sumSize(node.dirs[d]); });
-    return n;
+  function span(cls, text) {
+    var s = document.createElement('span');
+    if (cls) s.className = cls;
+    if (text !== undefined) s.textContent = text;
+    return s;
   }
 
-  function fileRow(entry, depth) {
-    var row = document.createElement('div');
-    row.className = 'trow';
-    row.dataset.path = entry.path;
-    row.style.paddingLeft = (6 + depth * 14) + 'px';
+  function enterDir(p) {
+    cwd = p || '';
+    selected = {};
+    renderFiles();
+  }
 
-    var name = document.createElement('span');
-    name.className = 'tname mono';
-    name.textContent = entry.path.split('/').pop();
+  function renderCrumbs() {
+    var box = el('crumbs');
+    box.textContent = '';
 
-    var size = document.createElement('span');
-    size.className = 'tsize';
-    size.textContent = fmtSize(entry.size);
+    var root = document.createElement('a');
+    root.href = 'javascript:void(0)';
+    root.textContent = '站点根';
+    root.onclick = function () { enterDir(''); };
+    box.appendChild(root);
 
-    var dig = document.createElement('span');
-    dig.className = 'tdigest';
-    dig.textContent = (entry.digest || '').slice(0, 8);
+    var acc = '';
+    (cwd ? cwd.split('/') : []).forEach(function (part) {
+      acc = acc ? acc + '/' + part : part;
+      box.appendChild(span('muted', ' / '));
+      var a = document.createElement('a');
+      a.href = 'javascript:void(0)';
+      a.textContent = part;
+      var target = acc;
+      a.onclick = function () { enterDir(target); };
+      box.appendChild(a);
+    });
+  }
 
-    var act = document.createElement('span');
-    act.className = 'tact';
+  // actionCell 给一行拼出操作按钮。
+  //
+  // 目录与文件一样要能删、能复制：这是「轻量资源管理器」与
+  // 一张文件表的区别。
+  function actionCell(item) {
+    var act = span('tact');
+
+    var copy = document.createElement('button');
+    copy.textContent = '复制';
+    copy.onclick = function (e) {
+      e.stopPropagation();
+      clip = [item.path];
+      updateClipInfo();
+      log('已记下 ' + item.path + '，切到目标目录后点粘贴', 'ok');
+    };
+
     var del = document.createElement('button');
     del.textContent = '删除';
-    del.onclick = function (e) { e.stopPropagation(); removeFile(entry.path); };
-    act.appendChild(del);
+    del.onclick = function (e) {
+      e.stopPropagation();
+      removeEntry(item);
+    };
 
-    row.appendChild(name); row.appendChild(size); row.appendChild(dig); row.appendChild(act);
-    attachFileDrop(row);
+    act.appendChild(copy);
+    act.appendChild(del);
+    return act;
+  }
+
+  function fileRow(item) {
+    var row = document.createElement('div');
+    row.className = 'trow';
+    row.dataset.path = item.path;
+    if (selected[item.path]) row.classList.add('sel');
+
+    row.appendChild(span('twist', ''));
+    row.appendChild(span('tname mono', item.name));
+    row.appendChild(span('tsize', fmtSize(item.size)));
+    row.appendChild(span('tdigest', (item.digest || '').slice(0, 8)));
+    row.appendChild(actionCell(item));
+
+    row.onclick = function (e) {
+      if (e.target.tagName === 'BUTTON') return;
+      toggleSelect(item.path, row);
+    };
     return row;
   }
 
-  function dirRow(node, dirPath, depth, box) {
+  function dirRow(item) {
     var row = document.createElement('div');
     row.className = 'trow dir';
-    row.style.paddingLeft = (6 + depth * 14) + 'px';
+    row.dataset.path = item.path;
+    if (selected[item.path]) row.classList.add('sel');
 
-    var twist = document.createElement('span');
-    twist.className = 'twist';
-    twist.textContent = '▾';
+    var st = dirStats(item.path);
 
-    var name = document.createElement('span');
-    name.className = 'tname dirname';
-    name.textContent = node.name + '/';
+    row.appendChild(span('twist', '▸'));
+    row.appendChild(span('tname dirname mono', item.name + '/'));
+    row.appendChild(span('tsize', fmtSize(st.size)));
+    row.appendChild(span('tdigest', st.count + ' 个'));
+    row.appendChild(actionCell(item));
 
-    var size = document.createElement('span');
-    size.className = 'tsize';
-    size.textContent = fmtSize(sumSize(node));
-
-    var count = document.createElement('span');
-    count.className = 'tdigest';
-    count.textContent = countFiles(node) + ' 个';
-
-    row.appendChild(twist); row.appendChild(name); row.appendChild(size); row.appendChild(count);
-
-    var kids = document.createElement('div');
-    kids.className = 'kids';
-    renderNode(node, dirPath, depth + 1, kids);
-
-    row.onclick = function () {
-      var open = !kids.hidden;
-      kids.hidden = open;
-      twist.textContent = open ? '▸' : '▾';
+    row.onclick = function (e) {
+      if (e.target.tagName === 'BUTTON') return;
+      enterDir(item.path);
     };
-
-    // 拖到这个目录行上，文件落在它里面
-    attachDirDrop(row, dirPath);
-
-    box.appendChild(row);
-    box.appendChild(kids);
+    return row;
   }
 
-  function renderNode(node, dirPath, depth, box) {
-    Object.keys(node.dirs).sort().forEach(function (d) {
-      var child = node.dirs[d];
-      dirRow(child, dirPath ? dirPath + '/' + d : d, depth, box);
-    });
-    node.files.slice().sort(function (a, b) { return a.name < b.name ? -1 : 1; }).forEach(function (f) {
-      box.appendChild(fileRow(f.entry, depth));
-    });
+  function upRow() {
+    var row = document.createElement('div');
+    row.className = 'trow up';
+    row.appendChild(span('twist', '↑'));
+    row.appendChild(span('tname mono', '..'));
+    row.appendChild(span('tsize', ''));
+    row.appendChild(span('tdigest', ''));
+    row.appendChild(span('tact', ''));
+    row.onclick = function () {
+      var parts = cwd.split('/');
+      parts.pop();
+      enterDir(parts.join('/'));
+    };
+    return row;
   }
 
-  function renderFiles(files) {
+  function toggleSelect(p, row) {
+    if (selected[p]) {
+      delete selected[p];
+      row.classList.remove('sel');
+    } else {
+      selected[p] = true;
+      row.classList.add('sel');
+    }
+    updateClipInfo();
+  }
+
+  function updateClipInfo() {
+    var n = Object.keys(selected).length;
+    el('clipInfo').textContent = clip.length
+      ? ('已复制 ' + clip.length + ' 项' + (n ? '，选中 ' + n + ' 项' : ''))
+      : (n ? '选中 ' + n + ' 项' : '');
+  }
+
+  // renderFiles 重画当前目录。不拉 state：进出目录不改变磁盘。
+  function renderFiles() {
+    renderCrumbs();
     var box = el('files');
     box.textContent = '';
 
-    // 查重名要用当前磁盘上的路径，在这里更新，refresh 之后就准了
-    currentPaths = {};
-    files.forEach(function (f) { currentPaths[f.path] = true; });
+    if (cwd) box.appendChild(upRow());
 
-    renderNode(buildTree(files), '', 0, box);
+    var kids = childrenOf(allFiles, cwd);
+    if (!kids.length) {
+      var empty = document.createElement('div');
+      empty.className = 'trow';
+      empty.appendChild(span('twist', ''));
+      empty.appendChild(span('tname muted', cwd ? '这个目录是空的，把文件拖进来。' : '站点里还没有文件。'));
+      box.appendChild(empty);
+    } else {
+      kids.forEach(function (k) {
+        box.appendChild(k.type === 'dir' ? dirRow(k) : fileRow(k));
+      });
+    }
+
+    el('fileUp').disabled = !cwd;
+    updateClipInfo();
+  }
+
+  // ---- 文件操作 ----
+
+  // removeEntry 删一个文件或整个目录。
+  // 删除不可撤销，所以先说清楚要删什么，目录还要点名「及其中的全部内容」。
+  async function removeEntry(item) {
+    var what = item.type === 'dir'
+      ? '目录 ' + item.path + ' 及其中的全部内容'
+      : item.path;
+    if (!confirm('删除 ' + what + '？\n\n这个动作不能撤销。')) return;
+
+    var res = await api('/api/files/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ site: site, path: item.path }),
+    });
+    var out = await res.json();
+    if (!res.ok) { log('删除失败：' + (out.error || res.status), 'err'); return; }
+    log('已删除 ' + item.path, 'ok');
+
+    // 删掉的正是当前目录或它的祖先时，退到根，不然会停在一个不存在的地方
+    if (cwd === item.path || cwd.indexOf(item.path + '/') === 0) cwd = '';
+    refresh();
+  }
+
+  function copySelected() {
+    var picks = Object.keys(selected);
+    if (!picks.length) { log('先点一行选中它', 'warn'); return; }
+    clip = picks.slice();
+    updateClipInfo();
+    log('已记下 ' + clip.length + ' 项，切到目标目录后点粘贴', 'ok');
+  }
+
+  // pasteClip 把剪贴板里的东西复制到当前目录。
+  //
+  // 同名时先问一次，与拖入同一套规矩：重不重名是拖入/粘贴时
+  // 真正要判断的事，而不是「落在哪一行上」。
+  async function pasteClip() {
+    if (!clip.length) { log('剪贴板是空的：先点某一行的「复制」', 'warn'); return; }
+
+    var targets = clip.map(function (p) {
+      var name = p.split('/').pop();
+      return cwd ? cwd + '/' + name : name;
+    });
+    var clashes = targets.filter(function (t) { return currentPaths[t]; });
+    if (clashes.length) {
+      if (!confirm('目标目录里已有 ' + clashes.length + ' 个同名项：' + clashes.slice(0, 3).join('、') +
+        '\n\n确定 = 覆盖它们；取消 = 放弃这次粘贴。')) {
+        log('已取消粘贴', 'warn');
+        return;
+      }
+    }
+
+    var res = await api('/api/files/copy', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ site: site, from: clip, to: cwd }),
+    });
+    var out = await res.json();
+    if (!res.ok) { log('粘贴失败：' + (out.error || res.status), 'err'); return; }
+
+    var ok = 0, bad = [];
+    (out.results || []).forEach(function (r) {
+      if (r.error) bad.push(r.path + '（' + r.error + '）'); else ok++;
+    });
+    if (ok) log('已粘贴 ' + ok + ' 项', 'ok');
+    if (bad.length) log('有 ' + bad.length + ' 项没成：\n  ' + bad.join('\n  '), 'err');
+    refresh();
+  }
+
+  async function newFolder() {
+    var name = prompt('新文件夹的名字');
+    if (name === null) return;
+    name = name.trim();
+    if (!name) return;
+    if (name.indexOf('/') >= 0 || name.indexOf('\\') >= 0) {
+      log('名字里不能带路径分隔符', 'err');
+      return;
+    }
+    var p = cwd ? cwd + '/' + name : name;
+
+    var res = await api('/api/files/mkdir', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ site: site, path: p }),
+    });
+    var out = await res.json();
+    if (!res.ok) { log('新建失败：' + (out.error || res.status), 'err'); return; }
+    log('已新建 ' + p, 'ok');
+    refresh();
   }
 
   // 拖放。落点按拖到哪决定：
@@ -765,65 +976,22 @@ const DefaultPage = `<!doctype html>
     refresh();
   }
 
-  // attachFileDrop：拖到某一行上，替换那一行的文件。
-  function attachFileDrop(row) {
-    row.addEventListener('dragover', function (e) {
+  // attachPanelDrop 把一块区域变成拖放区，落点由 baseFn() 给出。
+  //
+  // 落点不再是「拖到哪一行上」：那是上一版的思路，很反直觉。
+  // 现在整个面板就是一个落点，拖进来之后要判断的是「重不重名」，
+  // 而那件事与拖到哪个位置无关。
+  function attachPanelDrop(node, baseFn) {
+    node.addEventListener('dragover', function (e) {
       e.preventDefault();
-      row.classList.add('drop');
+      node.classList.add('drop');
     });
-    row.addEventListener('dragleave', function () { row.classList.remove('drop'); });
-    row.addEventListener('drop', async function (e) {
+    node.addEventListener('dragleave', function () { node.classList.remove('drop'); });
+    node.addEventListener('drop', function (e) {
       e.preventDefault();
-      e.stopPropagation();
-      row.classList.remove('drop');
-
-      var items = await collectDrops(e.dataTransfer);
-      if (!items.length) return;
-      if (items.length > 1) {
-        log('拖到了文件行上，只取第一个：' + items[0].rel, 'warn');
-      }
-
-      var b64 = await readAsB64(items[0].file);
-      var res = await api('/api/files/replace', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ site: site, files: [{ path: row.dataset.path, bytes: b64 }] }),
-      });
-      var out = await res.json();
-      if (!res.ok) { log('替换失败：' + (out.error || res.status), 'err'); return; }
-      var r = (out.results || [])[0] || {};
-      if (r.error) { log('替换失败：' + r.error, 'err'); return; }
-      log('已替换 ' + row.dataset.path + '（' + fmtSize(r.size || 0) + '）', 'ok');
-      refresh();
+      node.classList.remove('drop');
+      dropInto(baseFn(), e.dataTransfer);
     });
-  }
-
-  // attachDirDrop：拖到目录行（或面板空白）上，文件落到那个目录里。
-  function attachDirDrop(row, base) {
-    row.addEventListener('dragover', function (e) {
-      e.preventDefault();
-      e.stopPropagation();
-      row.classList.add('drop');
-    });
-    row.addEventListener('dragleave', function () { row.classList.remove('drop'); });
-    row.addEventListener('drop', function (e) {
-      e.preventDefault();
-      e.stopPropagation();
-      row.classList.remove('drop');
-      dropInto(base, e.dataTransfer);
-    });
-  }
-
-  async function removeFile(path) {
-    var res = await api('/api/files/delete', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ site: site, path: path }),
-    });
-    var out = await res.json();
-    if (!res.ok) { log('删除失败：' + (out.error || res.status), 'err'); return; }
-    log('已删除 ' + path, 'ok');
-    refresh();
   }
 
   // 最近一次发起的任务参数。失败后「重试」就是拿它原样再发一次。
@@ -931,8 +1099,17 @@ const DefaultPage = `<!doctype html>
   el('refresh').onclick = refresh;
   el('connWallet').onclick = connectWallet;
 
-  // 文件树本身就是兜底的拖放区：拖到空白处（不是某一行）就落到站点根
-  attachDirDrop(el('files'), '');
+  el('fileUp').onclick = function () {
+    var parts = cwd ? cwd.split('/') : [];
+    parts.pop();
+    enterDir(parts.join('/'));
+  };
+  el('fileCopy').onclick = copySelected;
+  el('filePaste').onclick = pasteClip;
+  el('fileMkdir').onclick = newFolder;
+
+  // 整个面板就是一个拖放区，落点永远是当前目录
+  attachPanelDrop(el('files'), function () { return cwd; });
 
   // 拖到页面别处时，浏览器默认会直接打开这个文件。一律拦掉。
   document.addEventListener('dragover', function (e) { e.preventDefault(); });

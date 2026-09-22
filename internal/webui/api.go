@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -664,6 +665,10 @@ type deleteRequest struct {
 	Path string `json:"path"`
 }
 
+// handleFileDelete 删掉一个文件或一整个目录。
+//
+// 目录用 RemoveAll 递归删。这个动作不能撤销，所以界面那边必须先问过用户；
+// 这里只负责执行，并把删了什么东西说清楚。
 func (s *Server) handleFileDelete(w http.ResponseWriter, r *http.Request) {
 	var req deleteRequest
 	if !decodeBody(w, r, &req) {
@@ -676,7 +681,195 @@ func (s *Server) handleFileDelete(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
+	// 别把站点根自己删了：那一下会把整个站点连同 .rog 一起清掉
+	if sameFile(full, site) {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("不能删除站点根目录"))
+		return
+	}
+
+	info, err := os.Stat(full)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, err)
+		return
+	}
+
+	if info.IsDir() {
+		if err := os.RemoveAll(full); err != nil {
+			writeErr(w, http.StatusInternalServerError, err)
+			return
+		}
+		writeJSON(w, map[string]any{"ok": true, "path": req.Path, "dir": true})
+		return
+	}
+
 	if err := os.Remove(full); err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "path": req.Path})
+}
+
+// sameFile 判断两个路径是不是同一个位置。
+func sameFile(a, b string) bool {
+	fa, err1 := filepath.Abs(a)
+	fb, err2 := filepath.Abs(b)
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	return strings.EqualFold(filepath.Clean(fa), filepath.Clean(fb))
+}
+
+type copyRequest struct {
+	Site string   `json:"site"`
+	From []string `json:"from"` // 源路径（相对站点根）
+	To   string   `json:"to"`   // 目标目录（相对站点根），空串表示根
+}
+
+// handleFileCopy 把一批文件或目录复制到另一个目录里。
+//
+// 与拖入同一条思路：目标就是「那个目录」，不是某个文件，
+// 重不重名由调用方（界面）先问过用户。
+//
+// 同名时在这里直接覆盖：界面已经把选择交代给用户了，
+// 再一次静默跳过反而会让人以为复制成功了。
+func (s *Server) handleFileCopy(w http.ResponseWriter, r *http.Request) {
+	var req copyRequest
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	site := siteOf(s, req.Site)
+	if len(req.From) == 0 {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("没有指定要复制的东西"))
+		return
+	}
+
+	dstDir, err := safeJoin(site, req.To)
+	if err != nil {
+		// 空 to 表示站点根
+		if strings.TrimSpace(req.To) != "" {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		dstDir = site
+	}
+	if err := os.MkdirAll(dstDir, 0o755); err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	results := make([]replaceResult, 0, len(req.From))
+	for _, rel := range req.From {
+		src, err := safeJoin(site, rel)
+		if err != nil {
+			results = append(results, replaceResult{Path: rel, Error: err.Error()})
+			continue
+		}
+		name := filepath.Base(filepath.Clean(src))
+		dst := filepath.Join(dstDir, name)
+
+		// 复制到它自己所在的目录里，等于原地不动，没意义
+		if sameFile(src, dst) {
+			results = append(results, replaceResult{Path: rel, Error: "源与目标相同"})
+			continue
+		}
+		// 不允许把目录复制进它自己的子目录：那会无限递归
+		if inside(src, dst) {
+			results = append(results, replaceResult{Path: rel, Error: "不能把目录复制进它自己里面"})
+			continue
+		}
+
+		if err := copyTree(src, dst); err != nil {
+			results = append(results, replaceResult{Path: rel, Error: err.Error()})
+			continue
+		}
+		rel2, _ := filepath.Rel(site, dst)
+		results = append(results, replaceResult{Path: filepath.ToSlash(rel2)})
+	}
+
+	writeJSON(w, map[string]any{"ok": true, "results": results})
+}
+
+// inside 判断 child 是否在 parent 里面（含自身）。
+func inside(parent, child string) bool {
+	pa, err1 := filepath.Abs(parent)
+	ca, err2 := filepath.Abs(child)
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	rel, err := filepath.Rel(pa, ca)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (!strings.HasPrefix(rel, "..") && !filepath.IsAbs(rel))
+}
+
+// copyTree 递归复制文件或目录。
+func copyTree(src, dst string) error {
+	info, err := os.Stat(src)
+	if err != nil {
+		return err
+	}
+
+	if !info.IsDir() {
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			return err
+		}
+		return copyFile(src, dst, info.Mode())
+	}
+
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if err := copyTree(filepath.Join(src, e.Name()), filepath.Join(dst, e.Name())); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func copyFile(src, dst string, mode os.FileMode) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode.Perm())
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	_, err = io.Copy(out, in)
+	return err
+}
+
+type mkdirRequest struct {
+	Site string `json:"site"`
+	Path string `json:"path"`
+}
+
+// handleFileMkdir 新建一个目录。
+//
+// 资源管理器总得能建目录，否则「把文件整理到子目录里」这件事就做不了。
+func (s *Server) handleFileMkdir(w http.ResponseWriter, r *http.Request) {
+	var req mkdirRequest
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	site := siteOf(s, req.Site)
+
+	full, err := safeJoin(site, req.Path)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := os.MkdirAll(full, 0o755); err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
