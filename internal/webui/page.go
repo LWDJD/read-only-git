@@ -368,6 +368,33 @@ const DefaultPage = `<!doctype html>
     });
   }
 
+  // reward 要在节点给的最低价上抬一手。
+  //
+  // 为什么必须抬：/price 返回的是「最低可接受价」，而节点把交易收进
+  // mempool 后是按 reward 排序的——见 ar_tx:utility/1，v2 交易的优先级
+  // 就是 {2, Denomination, Reward}，连数据大小都不看。mempool 一满，
+  // ar_mempool:find_low_priority_txs/2 就丢最低的那批。
+  //
+  // 付最低价 = 优先级垫底 = 网络一忙第一个被挤掉。
+  // 而 POST /tx 那一步早就返回 200 了，响应里看不出任何异常，
+  // 现象就是「提示上传成功、链上从此查不到」。
+  //
+  // 系数不大，目的是「别垫底」而不是「抢着打包」。
+  var REWARD_MULTIPLIER = 2;
+
+  // bumpReward 把 arweave-js 算出的最低价抬一档。
+  // 必须在签名之前调：reward 是签名输入的一项，签完再改就对不上了。
+  function bumpReward(tx) {
+    try {
+      var base = BigInt(tx.reward);
+      if (base > 0n) {
+        tx.reward = (base * BigInt(REWARD_MULTIPLIER)).toString();
+      }
+    } catch (e) {
+      // 算不出来就维持原值。「抬一手」是优选项，不值得为此把发布搞停。
+    }
+  }
+
   // 让钱包签一笔「data 就是这一整包」的交易，然后自己提交上链。
   //
   // 为什么提交也放在这里：署名用的对象与提交出去的对象是同一个，
@@ -386,6 +413,8 @@ const DefaultPage = `<!doctype html>
     for (var i = 0; i < list.length; i++) {
       tx.addTag(list[i].name, list[i].value);
     }
+    // 抬价要在签名之前，reward 是签名输入的一项。
+    bumpReward(tx);
     // 省略 JWK 参数时 arweave-js 会走注入的钱包
     await arweave.transactions.sign(tx);
 
@@ -397,27 +426,58 @@ const DefaultPage = `<!doctype html>
       throw new Error('签名自验没过：钱包返回的 owner / signature 与这笔交易的签名输入对不上');
     }
 
-    // 自己传。upload 会按块数自动选路，单块走 /tx、多块逐块 /chunk。
-    await arweave.transactions.upload(tx);
+    // 提交。
+    //
+    // 单块时自己 POST，不用 upload()：需要看到节点到底回了什么。
+    // 实测碰到的正是「upload 说成功、链上却查不到」，
+    // 而 upload 不暴露响应体，一出这种情形就无从判断。
+    var chunkCount = (tx.chunks && tx.chunks.chunks) ? tx.chunks.chunks.length : 1;
+    var postStatus = 0, postBody = '';
+
+    if (chunkCount <= 1) {
+      try {
+        var resp = await arweave.api.post('tx', tx);
+        postStatus = resp.status;
+        postBody = typeof resp.data === 'string' ? resp.data : JSON.stringify(resp.data);
+      } catch (e) {
+        postStatus = (e && e.response && e.response.status) || -1;
+        if (e && e.response && e.response.data) {
+          postBody = String(e.response.data);
+        } else {
+          postBody = (e && e.message) || String(e);
+        }
+      }
+      if (postStatus < 200 || postStatus >= 300) {
+        throw new Error('节点拒收交易（' + postStatus + '）：' + postBody.slice(0, 300));
+      }
+    } else {
+      // 多块交给 upload，它会把 /tx 与逐块 /chunk 都走完。
+      // 这条路看不到响应体，但块多时自己实现风险更大。
+      await arweave.transactions.upload(tx);
+      postStatus = 200;
+    }
 
     // 等一会儿再查一次状态。
     //
     // 不要刚 POST 完就查：节点是异步收录的，那一刻问往往得到 404，
-    // 而这并不代表交易丢了——曾经就因此误报过「交易被丢弃」。
-    // 这里问不到也只记一笔，不当作失败：真正的确认要等区块，
-    // 那是几分钟之后的事，不是提交这一步能等到的。
+    // 而这并不代表交易丢了。这里问不到也只记一笔，不当作失败：
+    // 真正的确认要等区块，那是几分钟之后的事。
     await delay(3000);
     var st = null;
     try { st = await arweave.transactions.getStatus(tx.id); } catch (e) { st = null; }
 
     // 只回一个 ID 就够了，不必回传签名字段。
-    // reward 与状态带上，仅为了写进日志。
-    // status 为 0 表示此刻还没问出来，不代表失败。
+    // 其余字段都是给日志用的：「节点接受了但查不到」这类问题，
+    // 只能靠 POST 的响应原话才能说清楚。
+    var stStatus = 0;
+    if (st && typeof st === 'object' && 'status' in st) { stStatus = st.status; }
     return JSON.stringify({
       id: tx.id,
       uploaded: true,
-      status: st ? st.status : 0,
+      status: stStatus,
       reward: tx.reward,
+      postStatus: postStatus,
+      postBody: String(postBody).slice(0, 500),
     });
   }
 

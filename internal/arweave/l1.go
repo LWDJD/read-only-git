@@ -69,6 +69,13 @@ type TxSignature struct {
 	// Status 是提交后节点给出的状态码（200/202 表示节点手里有它）。
 	// 仅用于写日志：事后翻的时候这个值比什么都直接。
 	Status int `json:"status,omitempty"`
+	// PostStatus 是 POST /tx 那一刻节点回的状态码。
+	// 与 Status 不同：那是「节点受理了吗」，这是「事后还查得到吗」。
+	// 实测碰上过前者 2xx、后者 404 的情况，两个都得看。
+	PostStatus int `json:"postStatus,omitempty"`
+	// PostBody 是 POST /tx 的响应原话（截断）。
+	// 节点拒绝或丢弃时，原因就写在这里。
+	PostBody string `json:"postBody,omitempty"`
 }
 
 // TxSigner 是交易签名通道：把 bundle 与 tags 交给钱包，拿回交易的签名字段。
