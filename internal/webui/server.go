@@ -199,12 +199,47 @@ func (s *Server) handleTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// /api/task/<id>/note：把前端的一条消息记进任务日志。
+	//
+	// 为什么需要它：界面上那些话（尤其是「签名失败：…」）是前端写的，
+	// 而日志文件只收后端的 Logf。结果就是出了事翻日志，
+	// 最关键的那句偏偏不在。两边合成一条才能事后回溯。
+	if id, ok := strings.CutSuffix(rest, "/note"); ok {
+		s.handleTaskNote(w, r, id)
+		return
+	}
+
 	t := s.tasks.Get(rest)
 	if t == nil {
 		writeErr(w, http.StatusNotFound, fmt.Errorf("没有这个任务: %s", rest))
 		return
 	}
 	writeJSON(w, t.Snapshot())
+}
+
+// handleTaskNote 把前端的一条消息记进任务日志。
+//
+// 只接受一行文字，不做什么解释：前端已经把话组织好了，
+// 这里只负责让它落到同一个地方（界面 + 日志文件）。
+func (s *Server) handleTaskNote(w http.ResponseWriter, r *http.Request, id string) {
+	t := s.tasks.Get(id)
+	if t == nil {
+		writeErr(w, http.StatusNotFound, fmt.Errorf("没有这个任务: %s", id))
+		return
+	}
+	var req struct {
+		Line string `json:"line"`
+	}
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	line := strings.TrimSpace(req.Line)
+	if line == "" {
+		writeJSON(w, map[string]any{"ok": true})
+		return
+	}
+	t.Logf("[页面] %s", line)
+	writeJSON(w, map[string]any{"ok": true})
 }
 
 func (s *Server) streamTask(w http.ResponseWriter, r *http.Request, id string) {

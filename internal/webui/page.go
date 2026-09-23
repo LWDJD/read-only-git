@@ -286,6 +286,27 @@ const DefaultPage = `<!doctype html>
     box.scrollTop = box.scrollHeight;
   }
 
+  // 当前任务 id。note 要拿它把消息回传给后端。
+  var currentTaskId = '';
+
+  // note 把一条消息同时写到界面与任务日志。
+  //
+  // 为什么要回传：日志文件只收后端的 Logf，而像「签名失败：…」
+  // 这种话是前端写的。不回传的话，出了事翻日志，
+  // 最关键的那句偏偏不在——实测就是如此。
+  //
+  // 只用在关键处（失败、警告、阶段性结果）。逐条回传「已签名 N 个」
+  // 会把日志刷得看不清东西。
+  function note(line, cls) {
+    log(line, cls);
+    if (!currentTaskId) return;
+    api('/api/task/' + currentTaskId + '/note', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ line: line }),
+    }).catch(function () { /* 记日志失败不该影响正事 */ });
+  }
+
   function clearLog() { el('logs').textContent = ''; }
 
   // 站点骨架：把内嵌的前端模板写到站点目录。
@@ -379,23 +400,23 @@ const DefaultPage = `<!doctype html>
     // 自己传。upload 会按块数自动选路，单块走 /tx、多块逐块 /chunk。
     await arweave.transactions.upload(tx);
 
-    // 确认节点真的收下了。
+    // 等一会儿再查一次状态。
     //
-    // upload 返回只说明「节点受理了」（HTTP 2xx），不代表交易会被打包。
-    // 实测遇到过：提示上传完成，链上却查不到这笔交易。
-    // 200/202 表示节点手里有它，404 表示已经不在了。
+    // 不要刚 POST 完就查：节点是异步收录的，那一刻问往往得到 404，
+    // 而这并不代表交易丢了——曾经就因此误报过「交易被丢弃」。
+    // 这里问不到也只记一笔，不当作失败：真正的确认要等区块，
+    // 那是几分钟之后的事，不是提交这一步能等到的。
+    await delay(3000);
     var st = null;
     try { st = await arweave.transactions.getStatus(tx.id); } catch (e) { st = null; }
-    if (!st || st.status === 404) {
-      throw new Error('交易报给节点后查不到它（很可能被丢弃了）。常见原因是 reward 偏低');
-    }
 
     // 只回一个 ID 就够了，不必回传签名字段。
-    // reward 与状态带上，仅为了写进日志：事后翻的时候这两个值最有用。
+    // reward 与状态带上，仅为了写进日志。
+    // status 为 0 表示此刻还没问出来，不代表失败。
     return JSON.stringify({
       id: tx.id,
       uploaded: true,
-      status: st.status,
+      status: st ? st.status : 0,
       reward: tx.reward,
     });
   }
@@ -429,7 +450,7 @@ const DefaultPage = `<!doctype html>
       walletConnected = true;
       el('walletState').textContent = '已连接';
       el('walletState').className = 'ok';
-      log('已连接钱包', 'ok');
+      note('已连接钱包', 'ok');
       return true;
     } catch (e) {
       var msg = e && e.message ? e.message : String(e);
@@ -450,7 +471,7 @@ const DefaultPage = `<!doctype html>
     if (!walletConnected) {
       var ok = await connectWallet();
       if (!ok) {
-        log('钱包没连上，签名无法开始', 'err');
+        note('钱包没连上，签名无法开始', 'err');
         return;
       }
     }
@@ -491,7 +512,7 @@ const DefaultPage = `<!doctype html>
 
         await api('/sign/api/sign/' + task.id, { method: 'POST', body: signed });
       } catch (e) {
-        log('签名失败：' + (e && e.message ? e.message : String(e)), 'err');
+        note('签名失败：' + (e && e.message ? e.message : String(e)), 'err');
         return;
       }
 
@@ -1079,6 +1100,7 @@ const DefaultPage = `<!doctype html>
       setBusy(false);
       return;
     }
+    currentTaskId = out.taskId;
 
     // EventSource 不能自定义请求头，token 只能跟在 URL 上
     var src = new EventSource('/api/task/' + out.taskId + '/events?token=' + encodeURIComponent(TOKEN));

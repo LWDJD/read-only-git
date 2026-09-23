@@ -85,20 +85,18 @@ const DefaultPage = `<!doctype html>
     // 自己传。upload 会按块数自动选路。
     await arweave.transactions.upload(tx);
 
-    // 确认节点真的收下了。
+    // 等一会儿再查一次状态。
     //
-    // upload 返回只说明节点受理了，不代表交易会被打包。
-    // 实测遇到过：提示上传完成，链上却查不到这笔交易。
+    // 不要刚 POST 完就查：节点是异步收录的，那一刻问往往是 404，
+    // 而这并不代表交易丢了。这里问不到也只记一笔，不当作失败。
+    await delay(3000);
     var st = null;
     try { st = await arweave.transactions.getStatus(tx.id); } catch (e) { st = null; }
-    if (!st || st.status === 404) {
-      throw new Error('交易报给节点后查不到它（很可能被丢弃了）。常见原因是 reward 偏低');
-    }
 
     return JSON.stringify({
       id: tx.id,
       uploaded: true,
-      status: st.status,
+      status: st ? st.status : 0,
       reward: tx.reward,
     });
   }

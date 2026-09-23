@@ -3,6 +3,7 @@ package webui
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -485,6 +486,11 @@ func (s *Server) publishArweave(t *Task, site *publish.Site, req publishRequest,
 		}
 	}
 	if err != nil {
+		// 超时这一句要说清：它会以 context.DeadlineExceeded 的形式上来，
+		// 而那句话看不出到底卡在哪。实际上卡的就是等钱包。
+		if errors.Is(err, context.DeadlineExceeded) {
+			return fmt.Errorf("等钱包签名超时（30 分钟）。页面可能关了、或者签名一直没有完成")
+		}
 		return err
 	}
 
