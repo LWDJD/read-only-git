@@ -15,10 +15,12 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/LWDJD/read-only-git/internal/publish"
 	"github.com/LWDJD/read-only-git/internal/signer"
 )
 
@@ -56,6 +58,12 @@ func New(siteDir string, port int) *Server {
 	// 这里只要那几个端点（/api/next、/api/blob、/api/sign）。
 	s.sign = signer.New(nil)
 	s.sign.SetToken(s.token)
+
+	// 任务日志同时落一份到站点的 .rog/logs 下。
+	//
+	// 发布这种事往往要事后回头查，而界面上的日志一刷新就没了。
+	// 放在 .rog 里与发布记录同一个地方，它也整体不进版本库、不参与发布。
+	s.tasks.SetLogDir(filepath.Join(siteDir, publish.StateDir, "logs"))
 	return s
 }
 

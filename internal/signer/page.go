@@ -85,7 +85,22 @@ const DefaultPage = `<!doctype html>
     // 自己传。upload 会按块数自动选路。
     await arweave.transactions.upload(tx);
 
-    return JSON.stringify({ id: tx.id, uploaded: true });
+    // 确认节点真的收下了。
+    //
+    // upload 返回只说明节点受理了，不代表交易会被打包。
+    // 实测遇到过：提示上传完成，链上却查不到这笔交易。
+    var st = null;
+    try { st = await arweave.transactions.getStatus(tx.id); } catch (e) { st = null; }
+    if (!st || st.status === 404) {
+      throw new Error('交易报给节点后查不到它（很可能被丢弃了）。常见原因是 reward 偏低');
+    }
+
+    return JSON.stringify({
+      id: tx.id,
+      uploaded: true,
+      status: st.status,
+      reward: tx.reward,
+    });
   }
 
   /**

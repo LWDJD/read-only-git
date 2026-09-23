@@ -379,8 +379,25 @@ const DefaultPage = `<!doctype html>
     // 自己传。upload 会按块数自动选路，单块走 /tx、多块逐块 /chunk。
     await arweave.transactions.upload(tx);
 
-    // 只回一个 ID 就够了，不必回传签名字段
-    return JSON.stringify({ id: tx.id, uploaded: true });
+    // 确认节点真的收下了。
+    //
+    // upload 返回只说明「节点受理了」（HTTP 2xx），不代表交易会被打包。
+    // 实测遇到过：提示上传完成，链上却查不到这笔交易。
+    // 200/202 表示节点手里有它，404 表示已经不在了。
+    var st = null;
+    try { st = await arweave.transactions.getStatus(tx.id); } catch (e) { st = null; }
+    if (!st || st.status === 404) {
+      throw new Error('交易报给节点后查不到它（很可能被丢弃了）。常见原因是 reward 偏低');
+    }
+
+    // 只回一个 ID 就够了，不必回传签名字段。
+    // reward 与状态带上，仅为了写进日志：事后翻的时候这两个值最有用。
+    return JSON.stringify({
+      id: tx.id,
+      uploaded: true,
+      status: st.status,
+      reward: tx.reward,
+    });
   }
 
   // base64url 编码，不带填充。

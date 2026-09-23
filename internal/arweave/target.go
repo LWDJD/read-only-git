@@ -260,7 +260,12 @@ func (t *Target) submitL1(ctx context.Context, pending [][]byte, root string, re
 
 	// 页面已经提交过了，直接用它的 ID。
 	if sig.Uploaded {
-		t.logf("交易 %s（已在页面里提交）", sig.ID)
+		// 把节点回的状态与 reward 一并记下。
+		//
+		// 「提示上传完成」与「交易真的上链」是两件事：前者只代表节点
+		// 受理了（HTTP 2xx）。实测就撞上过提示完成、链上却查不到的情况，
+		// 而当时没有日志可查。这两个值留着，事后翻日志就能看出所以然。
+		t.logf("交易 %s（已在页面里提交，节点状态 %d，reward %s）", sig.ID, sig.Status, sig.Reward)
 		ClearPending(t.PendingPath)
 		return nil
 	}

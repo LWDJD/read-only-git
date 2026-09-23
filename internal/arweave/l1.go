@@ -66,6 +66,9 @@ type TxSignature struct {
 	// 这个问题——这也正是把提交交给 arweave-js 的理由。
 	// 为 true 时 Go 侧不重复提交，直接用 ID。
 	Uploaded bool `json:"uploaded,omitempty"`
+	// Status 是提交后节点给出的状态码（200/202 表示节点手里有它）。
+	// 仅用于写日志：事后翻的时候这个值比什么都直接。
+	Status int `json:"status,omitempty"`
 }
 
 // TxSigner 是交易签名通道：把 bundle 与 tags 交给钱包，拿回交易的签名字段。
