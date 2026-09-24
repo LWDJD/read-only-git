@@ -374,32 +374,21 @@ const DefaultPage = `<!doctype html>
     });
   }
 
-  // reward 要在节点给的最低价上抬一手。
+  // 价格交给 arweave-js 去问节点：不设 reward，它就会调
+  // /price/<这一包的字节数>（见 arweave-js common.js 的 createTransaction）。
   //
-  // 为什么必须抬：/price 返回的是「最低可接受价」，而节点把交易收进
-  // mempool 后是按 reward 排序的——见 ar_tx:utility/1，v2 交易的优先级
-  // 就是 {2, Denomination, Reward}，连数据大小都不看。mempool 一满，
-  // ar_mempool:find_low_priority_txs/2 就丢最低的那批。
+  // 这里曾经写过乘 2。那是排查「交易上了链、网关却打不开」时
+  // 为了排除变量加的，真因最后落在 bundle 缺少 ANS-104 头部
+  // （见 arweave/bundle.go），与手续费无关——所以乘 2 只是多花钱。
   //
-  // 付最低价 = 优先级垫底 = 网络一忙第一个被挤掉。
-  // 而 POST /tx 那一步早就返回 200 了，响应里看不出任何异常，
-  // 现象就是「提示上传成功、链上从此查不到」。
+  // 按节点报价付就够，依据是节点自己的校验：is_tx_fee_sufficient
+  // 要求 reward >= get_tx_fee(...)，而 /price 返回的就是 get_tx_fee 的结果，
+  // 两者同源。ArDrive 的做法也是这个：它的 FeeMultiple 默认值就是 1.0，
+  // 也就是「照报价付」。
   //
-  // 系数不大，目的是「别垫底」而不是「抢着打包」。
-  var REWARD_MULTIPLIER = 2;
-
-  // bumpReward 把 arweave-js 算出的最低价抬一档。
-  // 必须在签名之前调：reward 是签名输入的一项，签完再改就对不上了。
-  function bumpReward(tx) {
-    try {
-      var base = BigInt(tx.reward);
-      if (base > 0n) {
-        tx.reward = (base * BigInt(REWARD_MULTIPLIER)).toString();
-      }
-    } catch (e) {
-      // 算不出来就维持原值。「抬一手」是优选项，不值得为此把发布搞停。
-    }
-  }
+  // 一个已知例外：从未发过交易的地址还要多付一笔 NewAccountFee
+  // （ar_tx:get_tx_fee2 里的那个分支），而 /price/<size> 不含它。
+  // 首次发布若被拒，原因在这里，不在价格高低。
 
   // 让钱包签一笔「data 就是这一整包」的交易，然后自己提交上链。
   //
@@ -419,8 +408,7 @@ const DefaultPage = `<!doctype html>
     for (var i = 0; i < list.length; i++) {
       tx.addTag(list[i].name, list[i].value);
     }
-    // 抬价要在签名之前，reward 是签名输入的一项。
-    bumpReward(tx);
+    // 不设 reward，createTransaction 会去问 /price/<字节数>，照报价付。
     // 省略 JWK 参数时 arweave-js 会走注入的钱包
     await arweave.transactions.sign(tx);
 
