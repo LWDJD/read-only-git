@@ -245,15 +245,22 @@ func (t *Target) submitL1(ctx context.Context, pending [][]byte, root string, re
 	tags := BundleTags(t.Repo)
 
 	// 先看有没有上次签好但没提交成功的交易。包体没变，说明这份签名仍然对得上。
+	// 但签名本身还要过一遍本地验签：旧版页面回传的签名可能与明文 tags 不自洽
+	// （病灶见 TxSignature.Tags 的注释），直接复用只会再被拒一次。验不过就作废重签。
 	if p := LoadPending(t.PendingPath); p.SameBundle(bundle) {
-		t.logf("复用上次签好的交易（%d 字节），不必再签一次", len(bundle))
-		txID, err := SubmitBundle(ctx, t.Node, p.Bundle, p.Tags, p.Sig, t.Client, t.logf)
-		if err != nil {
-			return err
+		if err := VerifySignedTx(p.Sig, p.Tags); err != nil {
+			t.logf("上次的签名本地验签没过（%v），作废重签", err)
+			ClearPending(t.PendingPath)
+		} else {
+			t.logf("复用上次签好的交易（%d 字节），不必再签一次", len(bundle))
+			txID, err := SubmitBundle(ctx, t.Node, p.Bundle, p.Tags, p.Sig, t.Client, t.logf)
+			if err != nil {
+				return err
+			}
+			ClearPending(t.PendingPath)
+			t.logf("交易 %s；复用 %d 个，入口 %s", txID, reused, root)
+			return nil
 		}
-		ClearPending(t.PendingPath)
-		t.logf("交易 %s；复用 %d 个，入口 %s", txID, reused, root)
-		return nil
 	}
 
 	sig, err := t.TxSigner.SignTx(ctx, bundle, tags)
