@@ -31,6 +31,13 @@ export function renderMarkdown(source) {
     return `\n\u0000CB${codeBlocks.length - 1}\u0000\n`
   })
 
+  // 白名单折叠标签：README 常用 <details>/<summary>，这里把它们从转义态
+  // 还原成真标签。只认纯标签（summary 允许带文字），不认任何属性。
+  // 其余 HTML 仍是字面文本，脚本照旧进不来；代码块已在上面被占位替换，
+  // 里面的字面标签不会被误还原。
+  text = text.replace(/&lt;(\/?)summary&gt;/gi, '<$1summary>')
+             .replace(/&lt;(\/?)details&gt;/gi, '<$1details>')
+
   const out = []
   let listType = null
   let inQuote = false
@@ -48,7 +55,9 @@ export function renderMarkdown(source) {
     }
   }
 
-  for (const line of text.split('\n')) {
+  const lines = text.split('\n')
+  for (let li = 0; li < lines.length; li++) {
+    const line = lines[li]
     const marker = /^\u0000CB(\d+)\u0000$/.exec(line.trim())
     if (marker) {
       closeList()
@@ -60,6 +69,30 @@ export function renderMarkdown(source) {
     if (!line.trim()) {
       closeList()
       closeQuote()
+      continue
+    }
+
+    // 折叠块标签自成一块，不包 <p>（浏览器对 <p><details> 容错但不体面）
+    if (/^\s*<\/?details>\s*$/i.test(line) || /^\s*<summary>[\s\S]*<\/summary>\s*$/i.test(line)) {
+      closeList()
+      closeQuote()
+      out.push(line.trim())
+      continue
+    }
+
+    // GFM 表格：首行是表头，次行是 |---| 分隔行，其余是数据行。
+    // 不支持表格的后果很直观：README 里的表格全部退化成带竖线的段落。
+    if (/^\s*\|/.test(line) && li + 1 < lines.length && isTableDivider(lines[li + 1])) {
+      closeList()
+      closeQuote()
+      const header = parseTableRow(line)
+      li++
+      const body = []
+      while (li + 1 < lines.length && /^\s*\|/.test(lines[li + 1])) {
+        li++
+        body.push(parseTableRow(lines[li]))
+      }
+      out.push(renderTable(header, body))
       continue
     }
 
@@ -130,6 +163,28 @@ function inline(input) {
     .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
     .replace(/(^|[^\w*])\*([^*\n]+)\*/g, '$1<em>$2</em>')
     .replace(/~~([^~]+)~~/g, '<del>$1</del>')
+}
+
+/** 切一行表格单元格：去掉首尾的竖线再按竖线切 */
+function parseTableRow(line) {
+  const s = line.trim().replace(/^\|/, '').replace(/\|$/, '')
+  return s.split('|').map(c => c.trim())
+}
+
+/** 分隔行：每个单元格都是 :---: 这种写法 */
+function isTableDivider(line) {
+  const cells = parseTableRow(line)
+  return cells.length > 0 && cells.every(c => /^:?-{3,}:?$/.test(c))
+}
+
+function renderTable(header, rows) {
+  const th = header.map(c => `<th>${inline(c)}</th>`).join('')
+  const trs = rows.map(r => {
+    // 单元格数不齐时补空，不让一行的错位破坏整张表
+    const cells = header.map((_, i) => `<td>${inline(r[i] || '')}</td>`).join('')
+    return `<tr>${cells}</tr>`
+  }).join('')
+  return `<table><thead><tr>${th}</tr></thead><tbody>${trs}</tbody></table>`
 }
 
 /** 去掉 markdown 语法，用于标题或摘要 */

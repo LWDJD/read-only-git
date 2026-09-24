@@ -117,6 +117,15 @@ func Materialize(templateID, dir string, overwrite bool) ([]string, error) {
 		}
 		target := filepath.Join(dir, rel)
 
+		// repository.json 归 pack 管，不归骨架管：它是仓库清单，
+		// --force 也不能盖掉，那会把已有仓库的记录清成空清单。
+		// 骨架里带一份只是给新站开箱用的，存在就永远不碰。
+		if rel == "repository.json" {
+			if _, statErr := os.Stat(target); statErr == nil {
+				return nil
+			}
+		}
+
 		if !overwrite {
 			if _, statErr := os.Stat(target); statErr == nil {
 				// 已经在了，跳过
