@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -58,14 +59,11 @@ func (s *stubTxSigner) SignTx(ctx context.Context, data []byte, tags []Tag) (*Tx
 	defer s.mu.Unlock()
 	s.bundles = append(s.bundles, append([]byte(nil), data...))
 	s.tagSets = append(s.tagSets, tags)
-	return &TxSignature{
-		ID:        "tx-id",
-		Owner:     "owner",
-		Signature: "sig",
-		Reward:    "1000",
-		LastTx:    "anchor",
-		DataRoot:  "stub-root",
-	}, nil
+	sig, err := fakeSignedSig(tags, "1000", strconv.Itoa(len(data)))
+	if err != nil {
+		return nil, err
+	}
+	return sig, nil
 }
 
 func (s *stubTxSigner) bundleCount() int {

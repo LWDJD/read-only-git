@@ -130,13 +130,13 @@ type countingTxSigner struct {
 
 func (s *countingTxSigner) SignTx(ctx context.Context, data []byte, tags []Tag) (*TxSignature, error) {
 	s.calls.Add(1)
-	return &TxSignature{
-		ID: "tx-id", Owner: "owner", Signature: "sig",
-		Reward: "0", LastTx: "lt",
-		DataRoot: "root", DataSize: "999",
-		// 单块：走 /tx 带 data，不必真的分块
-		Proofs: []ChunkProof{{DataPath: "path", Offset: "998"}},
-	}, nil
+	sig, err := fakeSignedSig(tags, "0", "999")
+	if err != nil {
+		return nil, err
+	}
+	// 单块：走 /tx 带 data，不必真的分块
+	sig.Proofs = []ChunkProof{{DataPath: "path", Offset: "998"}}
+	return sig, nil
 }
 
 // 提交失败 → 留下待提交交易 → 重试时直接用，不再碰签名通道。

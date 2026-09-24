@@ -55,6 +55,15 @@ type TxSignature struct {
 	Reward    string `json:"reward"`
 	LastTx    string `json:"last_tx"`
 	DataRoot  string `json:"data_root"`
+	// Tags 是签名时交易里的 tags（base64url 形态）。
+	//
+	// 必须回传、必须用它拼交易 JSON：签名输入里的 tags 来自
+	// setSignature 之后的 tx.tags（钱包可能改写过 addTag 的那份），
+	// 而此前 Go 是自己拿明文编码一份塞进 JSON——签名用一份、提交发另一份，
+	// 节点解码出来的字节与签名输入不同，报的就是
+	// 400 Transaction verification failed。九项里唯一不同源的就是它。
+	// 页面旧版不回传时，回退到调用方给的明文（仅供兼容，会警告）。
+	Tags []Tag `json:"tags,omitempty"`
 	// DataSize 是这一包的字节数，与 DataRoot 一起描述这份数据。
 	DataSize string `json:"data_size"`
 	// Proofs 是各块的 Merkle 证明，按块序排列，只在需要分块时用得上。
@@ -151,7 +160,7 @@ func txPayload(data []byte, tags []Tag, sig *TxSignature) ([]byte, error) {
 		ID:        sig.ID,
 		LastTx:    sig.LastTx,
 		Owner:     sig.Owner,
-		Tags:      encodeTxTags(tags),
+		Tags:      txTagsOf(tags, sig),
 		Target:    "",
 		Quantity:  "0",
 		Data:      base64.RawURLEncoding.EncodeToString(data),
@@ -161,6 +170,19 @@ func txPayload(data []byte, tags []Tag, sig *TxSignature) ([]byte, error) {
 		Signature: sig.Signature,
 	}
 	return json.Marshal(tx)
+}
+
+// txTagsOf 决定交易 JSON 里带哪份 tags。
+//
+// 首选签名页回传的那份（已经是交易 JSON 形态，不再编码）：
+// 署名用它、提交就发它，节点解码出的字节才与签名输入一致。
+// 页面旧版不回传时，退回把明文编码一份——那时签名与提交本就同源
+// （都是 addTag 那份），不致出错，但应当更新页面。
+func txTagsOf(plain []Tag, sig *TxSignature) []Tag {
+	if sig != nil && len(sig.Tags) > 0 {
+		return sig.Tags
+	}
+	return encodeTxTags(plain)
 }
 
 // encodeTxTags 把 tags 编成交易 JSON 里的形式。

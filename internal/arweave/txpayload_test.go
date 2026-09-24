@@ -69,6 +69,33 @@ func TestTxPayloadEncodesTagsAsB64Url(t *testing.T) {
 	}
 }
 
+// 签名回传的 tags 与明文不同源时（钱包改写过），交易 JSON 必须跟签名那份走。
+//
+// 这就是多块 L1 那个 400 的病灶：此前 JSON 里的 tags 是 Go 拿明文自己编码的，
+// 而签名是对 setSignature 之后的 tx.tags 做的，两份不同源。
+func TestTxPayloadPrefersSignatureTags(t *testing.T) {
+	sig, err := fakeSignedSig(BundleTags("demo"), "0", "2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 模拟钱包改写后的 tags（已是交易 JSON 形态）
+	sig.Tags = []Tag{{Name: "QXBw", Value: "eA"}}
+
+	out, err := txPayload([]byte("hi"), BundleTags("other-repo"), sig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Tags []Tag `json:"tags"`
+	}
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got.Tags, sig.Tags) {
+		t.Fatalf("JSON 里该是签名回传的 tags，实际 %+v", got.Tags)
+	}
+}
+
 // 空 tags 要输出成 []，不能是 null。
 //
 // tags 为 nil 时 json.Marshal 会给 null，而节点对 null 也不客气。

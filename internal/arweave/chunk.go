@@ -132,6 +132,12 @@ func SubmitBundle(ctx context.Context, node string, data []byte, tags []Tag, sig
 		return "", fmt.Errorf("缺少签名字段")
 	}
 
+	// 提交前先按节点口径本地验一遍：签名与 id 不对的东西不该发出去，
+	// 而节点只会回一句看不出门道的 verification failed。
+	if err := VerifySignedTx(sig, tags); err != nil {
+		return "", fmt.Errorf("提交前本地验签没过：%w", err)
+	}
+
 	// 提交前把参与签名的字段摘要记一笔。
 	//
 	// arweave 的 format 2 交易，签名输入是

@@ -164,6 +164,10 @@ const DefaultPage = `<!doctype html>
       last_tx: tx.last_tx,
       data_root: tx.data_root,
       data_size: String(tx.data_size),
+      // tags 原样回传（签名时交易里的那份）：签名输入里的 tags 就是它，
+      // 提交出去的也必须是它。Go 另拿明文编码一份的话，
+      // 节点解码出的字节与签名输入不同，会被拒 Transaction verification failed。
+      tags: tx.tags,
       proofs: proofs,
     });
   }

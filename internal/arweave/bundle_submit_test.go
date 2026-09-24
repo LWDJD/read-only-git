@@ -33,11 +33,12 @@ func (s *chunkingTxSigner) SignTx(ctx context.Context, data []byte, tags []Tag) 
 	}
 	proofs = append(proofs, ChunkProof{DataPath: "p", Offset: strconv.Itoa(len(data) - 1)})
 
-	return &TxSignature{
-		ID: "tx-big", Owner: "o", Signature: "s",
-		DataRoot: "root-big", DataSize: strconv.Itoa(len(data)),
-		Proofs: proofs,
-	}, nil
+	sig, err := fakeSignedSig(tags, "0", strconv.Itoa(len(data)))
+	if err != nil {
+		return nil, err
+	}
+	sig.Proofs = proofs
+	return sig, nil
 }
 
 func (s *chunkingTxSigner) bundleCount() int {
@@ -121,7 +122,10 @@ func fastBackoff(t *testing.T) {
 // 装得下的时候不该碰分块，data 直接进交易。
 func TestSubmitBundleSingleChunkSkipsChunking(t *testing.T) {
 	data := []byte("small payload")
-	sig := &TxSignature{ID: "tx-1", Owner: "o", Signature: "s", DataRoot: "root"}
+	sig, err := fakeSignedSig(BundleTags("demo"), "0", "13")
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	node := &chunkNode{}
 	srv := httptest.NewServer(node.handler())
@@ -131,7 +135,7 @@ func TestSubmitBundleSingleChunkSkipsChunking(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if id != "tx-1" {
+	if id != sig.ID {
 		t.Fatalf("应返回交易 id，实际 %q", id)
 	}
 
@@ -161,14 +165,15 @@ func TestSubmitBundleChunked(t *testing.T) {
 		data[i] = byte(i & 0xff)
 	}
 
-	sig := &TxSignature{
-		ID: "tx-9", Owner: "o", Signature: "s",
-		DataRoot: "root-9", DataSize: "300000",
-		Proofs: []ChunkProof{
-			{DataPath: "p0", Offset: "262143"},
-			{DataPath: "p1", Offset: "299999"},
-		},
+	sig, err := fakeSignedSig(BundleTags("demo"), "0", "300000")
+	if err != nil {
+		t.Fatal(err)
 	}
+	sig.Proofs = []ChunkProof{
+		{DataPath: "p0", Offset: "262143"},
+		{DataPath: "p1", Offset: "299999"},
+	}
+	root := sig.DataRoot
 
 	node := &chunkNode{}
 	srv := httptest.NewServer(node.handler())
@@ -178,7 +183,7 @@ func TestSubmitBundleChunked(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if id != "tx-9" {
+	if id != sig.ID {
 		t.Fatalf("应返回交易 id，实际 %q", id)
 	}
 
@@ -189,7 +194,7 @@ func TestSubmitBundleChunked(t *testing.T) {
 	if txs[0]["data"] != "" {
 		t.Fatalf("分块时交易不该带 data，实际 %v", txs[0]["data"])
 	}
-	if txs[0]["data_root"] != "root-9" {
+	if txs[0]["data_root"] != root {
 		t.Fatalf("交易应带 data_root，实际 %#v", txs[0]["data_root"])
 	}
 	if txs[0]["data_size"] != "300000" {
@@ -207,7 +212,7 @@ func TestSubmitBundleChunked(t *testing.T) {
 	if want := base64.RawURLEncoding.EncodeToString(data[0:262144]); chunks[0]["chunk"] != want {
 		t.Fatal("第 0 块内容与 bundle 的对应区间不一致")
 	}
-	if chunks[0]["data_root"] != "root-9" || chunks[0]["data_size"] != "300000" {
+	if chunks[0]["data_root"] != root || chunks[0]["data_size"] != "300000" {
 		t.Fatalf("每块都该带上 data_root 与 data_size: %+v", chunks[0])
 	}
 
@@ -225,12 +230,13 @@ func TestSubmitBundleRetriesRetryableChunkError(t *testing.T) {
 	fastBackoff(t)
 
 	data := make([]byte, 300000)
-	sig := &TxSignature{
-		ID: "tx", Owner: "o", Signature: "s", DataRoot: "r", DataSize: "300000",
-		Proofs: []ChunkProof{
-			{DataPath: "p0", Offset: "262143"},
-			{DataPath: "p1", Offset: "299999"},
-		},
+	sig, err := fakeSignedSig(nil, "0", "300000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig.Proofs = []ChunkProof{
+		{DataPath: "p0", Offset: "262143"},
+		{DataPath: "p1", Offset: "299999"},
 	}
 
 	node := &chunkNode{chunkFail: 1}
@@ -253,19 +259,20 @@ func TestSubmitBundleDoesNotRetryFatalChunkError(t *testing.T) {
 	fastBackoff(t)
 
 	data := make([]byte, 300000)
-	sig := &TxSignature{
-		ID: "tx", Owner: "o", Signature: "s", DataRoot: "r", DataSize: "300000",
-		Proofs: []ChunkProof{
-			{DataPath: "p0", Offset: "262143"},
-			{DataPath: "p1", Offset: "299999"},
-		},
+	sig, err := fakeSignedSig(nil, "0", "300000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig.Proofs = []ChunkProof{
+		{DataPath: "p0", Offset: "262143"},
+		{DataPath: "p1", Offset: "299999"},
 	}
 
 	node := &chunkNode{chunkFatal: "invalid_proof"}
 	srv := httptest.NewServer(node.handler())
 	defer srv.Close()
 
-	_, err := SubmitBundle(context.Background(), srv.URL, data, nil, sig, nil, nil)
+	_, err = SubmitBundle(context.Background(), srv.URL, data, nil, sig, nil, nil)
 	if err == nil {
 		t.Fatal("致命错应当报出来")
 	}
@@ -282,12 +289,13 @@ func TestSubmitBundleDoesNotRetryFatalChunkError(t *testing.T) {
 // proof 与数据对不上时要在发请求之前就拦下。
 func TestSubmitBundleRejectsMismatchedProofs(t *testing.T) {
 	data := make([]byte, 100)
-	sig := &TxSignature{
-		ID: "tx", Owner: "o", Signature: "s", DataRoot: "r",
-		Proofs: []ChunkProof{
-			{DataPath: "p0", Offset: "50"},
-			{DataPath: "p1", Offset: "60"}, // 只覆盖到 61 字节
-		},
+	sig, err := fakeSignedSig(nil, "0", "100")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig.Proofs = []ChunkProof{
+		{DataPath: "p0", Offset: "50"},
+		{DataPath: "p1", Offset: "60"}, // 只覆盖到 61 字节
 	}
 
 	node := &chunkNode{}
