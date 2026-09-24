@@ -126,7 +126,9 @@ type stateResponse struct {
 	// 而相对路径的基准就是这个目录。不把它显示出来，用户就无从判断
 	// 自己写的 `public` 究章指的是哪里——实测就撞过这个坑：填了 public，
 	// 报「目录不是空的」，但错误里没说那是哪个 public。
-	Cwd       string        `json:"cwd"`
+	Cwd string `json:"cwd"`
+	// LogDir 是任务日志的落脚点。显出来是因为日志的价值在「出事时找得到」。
+	LogDir    string        `json:"logDir"`
 	Files     []fileState   `json:"files"`
 	TotalSize int64         `json:"totalSize"`
 	Repos     []repoState   `json:"repos"`
@@ -148,6 +150,9 @@ func (s *Server) buildState(site string) stateResponse {
 	out := stateResponse{Site: site}
 	if wd, err := os.Getwd(); err == nil {
 		out.Cwd = wd
+	}
+	if dir, err := DefaultLogDir(); err == nil {
+		out.LogDir = dir
 	}
 
 	// 站点目录不存在不算错误：新建站点时它就是空的。

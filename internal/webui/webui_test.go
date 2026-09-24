@@ -32,6 +32,9 @@ func newTestServer(t *testing.T, site string) *Server {
 	t.Helper()
 	// 端口传 0：测试之间互不干扰，由系统挑空闲的
 	srv := New(site, 0)
+	// 日志改写到临时目录。默认落点是用户主目录，测试不该往那儿写东西；
+	// 同时也让用例能确定地找到日志文件。
+	srv.tasks.SetLogDir(t.TempDir())
 	if err := srv.Start(); err != nil {
 		t.Fatal(err)
 	}

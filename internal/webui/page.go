@@ -268,6 +268,10 @@ const DefaultPage = `<!doctype html>
   </div>
 </main>
 
+<footer style="padding:8px 16px">
+  <span class="muted" id="footInfo"></span>
+</footer>
+
 <div class="logbox" id="logs">task 日志会显示在这里。</div>
 
 <script src="/sign/vendor/arweave.js"></script>
@@ -648,6 +652,15 @@ const DefaultPage = `<!doctype html>
       el('restoreHint').textContent =
         '目录里已经有东西时会直接报错，不会覆盖、也不会替你清空。' +
         '相对路径的基准是 webui 的启动目录：' + st.cwd;
+    }
+
+    // 底部常显两个路径：相对路径的基准、以及日志落在哪里。
+    // 日志的价值在「出事时找得到」，把位置写出来才谈得上找得到。
+    if (el('footInfo')) {
+      var bits = [];
+      if (st.cwd) bits.push('工作目录 ' + st.cwd);
+      if (st.logDir) bits.push('日志 ' + st.logDir);
+      el('footInfo').textContent = bits.join('　·　');
     }
 
     var rb = el('records');

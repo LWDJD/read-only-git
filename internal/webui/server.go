@@ -15,12 +15,12 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/LWDJD/read-only-git/internal/publish"
 	"github.com/LWDJD/read-only-git/internal/signer"
 )
 
@@ -59,12 +59,31 @@ func New(siteDir string, port int) *Server {
 	s.sign = signer.New(nil)
 	s.sign.SetToken(s.token)
 
-	// 任务日志同时落一份到站点的 .rog/logs 下。
+	// 任务日志落到用户目录下，不落进站点。
 	//
-	// 发布这种事往往要事后回头查，而界面上的日志一刷新就没了。
-	// 放在 .rog 里与发布记录同一个地方，它也整体不进版本库、不参与发布。
-	s.tasks.SetLogDir(filepath.Join(siteDir, publish.StateDir, "logs"))
+	// 原先放在 <站点>/.rog/logs 下，有两个问题：
+	// 一是它属于本机运维产物，与站点的生命周期无关，放在产物目录里
+	// 会让那个目录永远非空（想拿它当恢复目标就会被挡住）；
+	// 二是它每次发布都在变，混在「站点状态」里容易让人以为它跟着站点走。
+	//
+	// 放主目录而不是系统缓存目录：出问题时第一件事就是翻日志，
+	// 藏进一个没人知道的地方不合适。
+	if dir, err := DefaultLogDir(); err == nil {
+		s.tasks.SetLogDir(dir)
+	}
 	return s
+}
+
+// DefaultLogDir 返回任务日志的落脚点：用户主目录下的 .rog/logs。
+//
+// 单独抽出来是为了让启动时能把它打出来——日志的价值在于出事时找得到，
+// 而前提是用户知道它在哪里。
+func DefaultLogDir() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".rog", "logs"), nil
 }
 
 // newToken 生成一个随机的会话 token。
