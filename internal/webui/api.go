@@ -569,49 +569,77 @@ func (s *Server) handleSiteInit(w http.ResponseWriter, r *http.Request) {
 // ---------- 从链上恢复 ----------
 
 type restoreRequest struct {
-	Site    string `json:"site"`
-	Repo    string `json:"repo"`
 	Entry   string `json:"entry"`
+	Dest    string `json:"dest"`
 	Gateway string `json:"gateway"`
+	// 网络出口与发布面板同源：这里也是对外请求，同样会被代理影响。
+	ProxyMode string `json:"proxyMode"`
+	ProxyURL  string `json:"proxyUrl"`
 }
 
+// handleRestore 把链上的站点内容取回到一个空目录。
+//
+// 与发布请求里的 `from` 字段不是一件事：那是「只把发布记录取回来，
+// 好让下次增量少传几个文件」，服务于发布；这是「把内容本身落地成
+// 一个可用的目录」，服务于换机器之后的重建。两件事掺在一个面板里
+// 会让人以为恢复要跟发布一起做，所以它有自己的入口与目标目录。
+//
+// 目标目录必须是空的：这个动作会铺满一整个目录，如果里面原本有东西，
+// 要么覆盖别人的工作、要么混出一份半新半旧的结果，两种都不该悄悄发生。
+// 清空目录交给用户自己做——他知道那里原来是什么。
 func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	var req restoreRequest
 	if !decodeBody(w, r, &req) {
 		return
 	}
-	req.Site = siteOf(s, req.Site)
 	if strings.TrimSpace(req.Entry) == "" {
 		writeErr(w, http.StatusBadRequest, fmt.Errorf("入口 id 不能为空"))
 		return
 	}
+	if strings.TrimSpace(req.Dest) == "" {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("目标目录不能为空"))
+		return
+	}
+
+	mode, err := arweave.ParseProxyMode(req.ProxyMode)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if mode == arweave.ProxyManual && req.ProxyURL == "" {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("手动代理模式需要代理地址"))
+		return
+	}
+	client, err := arweave.NewClient(arweave.ProxyConfig{Mode: mode, URL: req.ProxyURL}, 0)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
 
 	id := s.tasks.Run("restore", func(t *Task) {
-		site, err := publish.Scan(req.Site)
+		ctx := context.Background()
+
+		// 先把 manifest 取回来理清映射，再动磁盘。
+		// 入口取不到是常见情形（刚发布的要等网关索引），
+		// 这种「还没开始就能预知的失败」不该等到写了一半个文件才发现。
+		plan, err := arweave.FetchManifest(ctx, req.Gateway, req.Entry, client)
 		if err != nil {
 			t.fail(err)
 			return
 		}
-		repo := req.Repo
-		if strings.TrimSpace(repo) == "" {
-			repo = filepath.Base(site.Root)
+		index := plan.IndexPath
+		if index == "" {
+			index = "（无）"
 		}
+		t.Logf("入口 %s：%d 个路径，默认入口 %s", plan.Entry, len(plan.Paths), index)
 
-		rec, err := arweave.FetchRecord(context.Background(), req.Gateway, req.Entry,
-			publish.RecordRelPath("arweave", repo))
+		n, err := arweave.RestoreInto(ctx, req.Gateway, plan, req.Dest, client, t.Logf)
 		if err != nil {
 			t.fail(err)
 			return
 		}
-
-		statePath := publish.StatePath(site.Root, "arweave", repo)
-		if err := publish.SaveRecord(statePath, rec); err != nil {
-			t.fail(err)
-			return
-		}
-
-		t.Logf("取回 %d 个文件引用，写入 %s", len(rec.Refs), statePath)
-		t.succeed(map[string]any{"statePath": statePath, "count": len(rec.Refs)})
+		t.Logf("恢复到 %s，共 %d 个文件", req.Dest, n)
+		t.succeed(map[string]any{"count": n, "dest": req.Dest})
 	})
 	writeJSON(w, map[string]string{"taskId": id})
 }

@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -338,5 +339,63 @@ func TestL1PublishChunksLargeBundle(t *testing.T) {
 		if c["data_root"] == "" {
 			t.Fatalf("第 %d 块缺 data_root", i)
 		}
+	}
+}
+
+// uploadedStubSigner 模拟「页面已经自己提交了」的那一类回传。
+type uploadedStubSigner struct {
+	sig *TxSignature
+}
+
+func (s *uploadedStubSigner) SignTx(context.Context, []byte, []Tag) (*TxSignature, error) {
+	return s.sig, nil
+}
+
+// 页面提交之后，日志要把 POST 的状态与节点原话都记下来。
+//
+// 线上撞过「POST 说受理、事后查不到」，那时日志里只有事后状态，
+// 看不出节点当时到底回了什么，也就无从定位。这条钉住两样都要有。
+func TestL1LogsPostStatusAndBody(t *testing.T) {
+	var lines []string
+	target := &Target{
+		Repo: "demo",
+		TxSigner: &uploadedStubSigner{sig: &TxSignature{
+			ID: "tx-abc", Uploaded: true,
+			PostStatus: 202, Status: 404,
+			Reward: "3300994621", PostBody: "some node message",
+		}},
+		Logf: func(format string, args ...any) {
+			lines = append(lines, fmt.Sprintf(format, args...))
+		},
+	}
+	if err := target.submitL1(context.Background(), [][]byte{makeDataItem(0x44, 520)}, "root-id", 0); err != nil {
+		t.Fatalf("提交失败: %v", err)
+	}
+
+	joined := strings.Join(lines, "\n")
+	for _, want := range []string{"POST 202", "事后状态 404", "some node message", "3300994621"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("日志里应当有 %q，实际：\n%s", want, joined)
+		}
+	}
+}
+
+// 事后 404 时要额外提醒一句：刚提交时 404 正常，久了就是没留住。
+func TestL1WarnsOnStaleStatus(t *testing.T) {
+	var lines []string
+	target := &Target{
+		Repo: "demo",
+		TxSigner: &uploadedStubSigner{sig: &TxSignature{
+			ID: "tx-abc", Uploaded: true, PostStatus: 200, Status: 404, Reward: "1",
+		}},
+		Logf: func(format string, args ...any) {
+			lines = append(lines, fmt.Sprintf(format, args...))
+		},
+	}
+	if err := target.submitL1(context.Background(), [][]byte{makeDataItem(0x55, 520)}, "root-id", 0); err != nil {
+		t.Fatalf("提交失败: %v", err)
+	}
+	if !strings.Contains(strings.Join(lines, "\n"), "没被节点留住") {
+		t.Errorf("事后 404 时应当提醒一句，实际：\n%s", strings.Join(lines, "\n"))
 	}
 }

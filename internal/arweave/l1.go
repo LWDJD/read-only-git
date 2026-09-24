@@ -76,6 +76,12 @@ type TxSignature struct {
 	// PostBody 是 POST /tx 的响应原话（截断）。
 	// 节点拒绝或丢弃时，原因就写在这里。
 	PostBody string `json:"postBody,omitempty"`
+	// Chunks 是这一包会被切成多少块（页面算的）。
+	//
+	// 大于 1 时页面不提交，只把 proofs 回传过来，由 Go 走
+	// /tx → 逐块 /chunk。写进日志是为了能一眼看出这一包走了哪条路：
+	// 单块的毛病与多块的毛病完全不同。
+	Chunks int `json:"chunkCount,omitempty"`
 }
 
 // TxSigner 是交易签名通道：把 bundle 与 tags 交给钱包，拿回交易的签名字段。

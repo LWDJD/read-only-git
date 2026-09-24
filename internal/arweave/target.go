@@ -263,20 +263,26 @@ func (t *Target) submitL1(ctx context.Context, pending [][]byte, root string, re
 
 	// 页面已经提交过了，直接用它的 ID。
 	if sig.Uploaded {
-		// 把节点回的状态与 reward 一并记下。
-		//
-		// 「提交成功」只是节点受理了，真正上链要等区块确认，
-		// 那是几分钟之后的事。所以这里把交易 ID 明确打出来，
-		// 让用户能自己去查证——而不是由我们拿一个暂时查不到的状态
-		// 当成失败（刚 POST 完立刻问，往往就是查不到的）。
-		if sig.Status == 0 {
-			t.logf("交易 %s（页面已提交；节点暂时没回报状态，reward %s）", sig.ID, sig.Reward)
-		} else {
-			t.logf("交易 %s（页面已提交；节点状态 %d，reward %s）", sig.ID, sig.Status, sig.Reward)
+		// 两个状态都要记：POST 那一刻节点回了什么，事后还查不查得到。
+		// 「节点接受了但随后查不到」这类问题，只有响应原话能说清。
+		t.logf("交易 %s（单块，页面已提交；POST %d，事后状态 %d，reward %s）",
+			sig.ID, sig.PostStatus, sig.Status, sig.Reward)
+		if body := strings.TrimSpace(sig.PostBody); body != "" {
+			t.logf("节点原话：%s", truncate(body, 300))
+		}
+		if sig.Status == http.StatusNotFound {
+			t.logf("! 事后查不到这笔交易。刚提交时 404 是正常的（节点异步收录），" +
+				"但如果过了几分钟仍是 404，说明它没被节点留住")
 		}
 		t.logf("确认情况可查：%s/tx/%s", DefaultGateway, sig.ID)
 		ClearPending(t.PendingPath)
 		return nil
+	}
+
+	// 多块：页面只签名并回传 proofs，提交由 Go 走 /tx → 逐块 /chunk。
+	// 这条路每一步都有日志，失败会退避重试，致命错会单独挑出来。
+	if sig.Chunks > 1 {
+		t.logf("这一包切成 %d 块，由本地提交（页面只签名）", sig.Chunks)
 	}
 
 	// 兑底：页面拿不到节点（或旧版页面只回传字段）时，走 Go 自己的提交。

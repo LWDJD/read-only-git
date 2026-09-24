@@ -99,12 +99,16 @@ const DefaultPage = `<!doctype html>
 
     // 提交。
     //
-    // 单块时自己 POST，不用 upload()：需要看到节点到底回了什么。
-    // 实测碰到的正是「upload 说成功、链上却查不到」。
+    // 单块：自己 POST，能看见节点回的每一句话。
+    // 多块：不在这里提交，把 proofs 回传给 Go，由它走 /tx → 逐块 /chunk。
+    //
+    // 为什么多块不自己上：arweave-js 的 upload() 不暴露响应体，
+    // 实测栽过的正是「upload 说成功、链上却查不到」。
+    // Go 那条路每一步都写日志、失败会退避重试、致命错会单独挑出来。
     var chunkCount = (tx.chunks && tx.chunks.chunks) ? tx.chunks.chunks.length : 1;
-    var postStatus = 0, postBody = '';
 
     if (chunkCount <= 1) {
+      var postStatus = 0, postBody = '';
       try {
         var resp = await arweave.api.post('tx', tx);
         postStatus = resp.status;
@@ -120,25 +124,47 @@ const DefaultPage = `<!doctype html>
       if (postStatus < 200 || postStatus >= 300) {
         throw new Error('节点拒收交易（' + postStatus + '）：' + postBody.slice(0, 300));
       }
-    } else {
-      await arweave.transactions.upload(tx);
-      postStatus = 200;
+
+      // 等一会儿再查状态：节点是异步收录的，立刻问往往得到 404。
+      await delay(3000);
+      var st = null;
+      try { st = await arweave.transactions.getStatus(tx.id); } catch (e) { st = null; }
+      var stStatus = 0;
+      if (st && typeof st === 'object' && 'status' in st) { stStatus = st.status; }
+
+      return JSON.stringify({
+        id: tx.id,
+        uploaded: true,
+        chunkCount: 1,
+        status: stStatus,
+        reward: tx.reward,
+        postStatus: postStatus,
+        postBody: String(postBody).slice(0, 500),
+      });
     }
 
-    // 等一会儿再查状态：节点是异步收录的，立刻问往往得到 404。
-    await delay(3000);
-    var st = null;
-    try { st = await arweave.transactions.getStatus(tx.id); } catch (e) { st = null; }
-
-    var stStatus = 0;
-    if (st && typeof st === 'object' && 'status' in st) { stStatus = st.status; }
+    var proofs = [];
+    var prfs = (tx.chunks && tx.chunks.proofs) ? tx.chunks.proofs : [];
+    for (var pi = 0; pi < prfs.length; pi++) {
+      proofs.push({
+        data_path: arweave.utils.bufferTob64Url(prfs[pi].proof),
+        offset: String(prfs[pi].offset),
+      });
+    }
+    if (proofs.length === 0) {
+      throw new Error('这一包需要分块，却没拿到分块证明，没法交给 Go 提交');
+    }
     return JSON.stringify({
       id: tx.id,
-      uploaded: true,
-      status: stStatus,
+      uploaded: false,
+      chunkCount: chunkCount,
+      owner: tx.owner,
+      signature: tx.signature,
       reward: tx.reward,
-      postStatus: postStatus,
-      postBody: String(postBody).slice(0, 500),
+      last_tx: tx.last_tx,
+      data_root: tx.data_root,
+      data_size: String(tx.data_size),
+      proofs: proofs,
     });
   }
 
