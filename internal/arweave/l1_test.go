@@ -3,7 +3,9 @@ package arweave
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -11,28 +13,99 @@ import (
 	"testing"
 )
 
-func TestBundleConcatenatesInOrder(t *testing.T) {
-	got := Bundle([][]byte{{1, 2}, {3}, {4, 5, 6}})
-	want := []byte{1, 2, 3, 4, 5, 6}
-	if !bytes.Equal(got, want) {
-		t.Fatalf("拼接结果不对: %v", got)
+// makeDataItem 造一个长度恰好 n 的假 data item：
+// 前 2 字节是签名类型，接着 512 字节是「签名」，其余用填充凑够。
+// 真签名内容无关紧要，这里只关心布局。
+func makeDataItem(fill byte, n int) []byte {
+	if n < 514 {
+		n = 514
+	}
+	item := make([]byte, n)
+	for i := range item {
+		item[i] = fill
+	}
+	return item
+}
+
+// bundle 必须是 ANS-104 结构，不是裸拼接。
+//
+// 依据是 arbundles 的 bundleAndSignData：
+//
+//	Buffer.concat([longTo32ByteArray(items.length), headers, binaries])
+//
+// 其中 headers 每项 64 字节（长度 32 + id 32）。
+// 少了这一段，网关读前 32 字节当数量，读到的却是签名数据，直接判非法，
+// 于是 bundle 里的 data item 一个都索引不出来——
+// 现象就是交易在链上、而入口 id 查 404。
+func TestBundleHasANS104Header(t *testing.T) {
+	items := [][]byte{
+		makeDataItem(0xA1, 8),
+		makeDataItem(0xB2, 12),
+	}
+	out, err := Bundle(items)
+	if err != nil {
+		t.Fatalf("拼 bundle 失败: %v", err)
+	}
+
+	// 一、开头 32 字节是 item 数量，且高位补零。
+	if got := binary.LittleEndian.Uint64(out[:8]); got != 2 {
+		t.Fatalf("item 数量期望 2，得到 %d", got)
+	}
+	for i := 8; i < bundleCountSize; i++ {
+		if out[i] != 0 {
+			t.Fatalf("数量字段的高位应当补零，offset %d = %d", i, out[i])
+		}
+	}
+
+	// 二、头部每项 64 字节：长度（32）+ id（32）。
+	bodyStart := bundleCountSize + bundleItemHeaderSize*len(items)
+	for i, item := range items {
+		base := bundleCountSize + bundleItemHeaderSize*i
+		if got := binary.LittleEndian.Uint64(out[base : base+8]); got != uint64(len(item)) {
+			t.Errorf("第 %d 项长度期望 %d，得到 %d", i, len(item), got)
+		}
+		sum := sha256.Sum256(item[dataItemSignatureTypeSize : dataItemSignatureTypeSize+dataItemSignatureSize])
+		if !bytes.Equal(out[base+32:base+64], sum[:]) {
+			t.Errorf("第 %d 项的 id 不对", i)
+		}
+	}
+
+	// 三、本体按顺序紧密排列。
+	if len(out) != bodyStart+len(items[0])+len(items[1]) {
+		t.Fatalf("总长期望 %d，得到 %d", bodyStart+len(items[0])+len(items[1]), len(out))
+	}
+	if !bytes.Equal(out[bodyStart:bodyStart+len(items[0])], items[0]) {
+		t.Error("第一项本体位置不对")
+	}
+	if !bytes.Equal(out[bodyStart+len(items[0]):], items[1]) {
+		t.Error("第二项本体位置不对")
 	}
 }
 
-// 空输入不该 panic，也不该凭空多出字节。
-func TestBundleEmpty(t *testing.T) {
-	if got := Bundle(nil); len(got) != 0 {
-		t.Fatalf("空输入应得空结果，实际 %v", got)
+// 空的 bundle 无法构成合法 ANS-104（数量字段写 0，但一段本体都没有），应当直接报错。
+func TestBundleRejectsEmpty(t *testing.T) {
+	if _, err := Bundle(nil); err == nil {
+		t.Fatal("空输入应当报错")
 	}
-	if got := Bundle([][]byte{}); len(got) != 0 {
-		t.Fatalf("空切片应得空结果，实际 %v", got)
+	if _, err := Bundle([][]byte{}); err == nil {
+		t.Fatal("空切片应当报错")
+	}
+}
+
+// 短于签名段的输入算不出 id，不能默默拼出一个坏 bundle。
+func TestBundleRejectsShortItem(t *testing.T) {
+	if _, err := Bundle([][]byte{{1, 2, 3}}); err == nil {
+		t.Fatal("data item 放不下签名段时应当报错")
 	}
 }
 
 // 拼接不能改动传入的切片，否则调用方手里的 data item 会被悄悄改掉。
 func TestBundleDoesNotMutateInput(t *testing.T) {
-	item := []byte{9, 9, 9}
-	out := Bundle([][]byte{item})
+	item := makeDataItem(9, 520)
+	out, err := Bundle([][]byte{item})
+	if err != nil {
+		t.Fatalf("拼 bundle 失败: %v", err)
+	}
 	out[0] = 0
 	if item[0] != 9 {
 		t.Fatal("Bundle 不该改动传入的切片")

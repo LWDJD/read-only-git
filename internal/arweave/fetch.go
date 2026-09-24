@@ -20,6 +20,13 @@ const DefaultGateway = "https://arweave.net"
 // （见 publish.RecordRelPath）。网关会把 <入口id>/<路径> 解析到对应的
 // data item，所以取回记录不需要额外的指针。
 func FetchRecord(ctx context.Context, gateway, entry, relPath string) (*publish.Record, error) {
+	return FetchRecordWithClient(ctx, gateway, entry, relPath, nil)
+}
+
+// FetchRecordWithClient 同 FetchRecord，但可以指定出口。
+//
+// client 为 nil 时按系统代理造一个，与不配置时期望的行为一致。
+func FetchRecordWithClient(ctx context.Context, gateway, entry, relPath string, client *http.Client) (*publish.Record, error) {
 	if strings.TrimSpace(entry) == "" {
 		return nil, fmt.Errorf("入口 id 不能为空")
 	}
@@ -33,7 +40,7 @@ func FetchRecord(ctx context.Context, gateway, entry, relPath string) (*publish.
 		return nil, err
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := clientOrDefault(client).Do(req)
 	if err != nil {
 		return nil, err
 	}

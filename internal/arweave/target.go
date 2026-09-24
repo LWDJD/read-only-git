@@ -3,6 +3,7 @@ package arweave
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"path/filepath"
 	"strings"
 	"time"
@@ -32,7 +33,15 @@ type Target struct {
 	// RecordPath 是发布记录在站点内的相对路径（用 / 分隔）。非空时会把记录
 	// 也传上链并写进 manifest，换机器后能靠入口取回来。
 	RecordPath string
-	Logf       func(format string, args ...any)
+	// Client 是所有对外请求（取记录、报交易、逐块 /chunk）用的 http client。
+	// 为空时按系统代理造一个。发布失败十有八九出在这里，
+	// 所以它必须是可配的，而不是隐式用标准库默认值。
+	Client *http.Client
+	// PendingPath 是「已签名未提交」的交易落盘位置。
+	//
+	// 有它，提交失败后的重试才能跳过钱包那一步。为空则不落盘。
+	PendingPath string
+	Logf        func(format string, args ...any)
 }
 
 func (t *Target) Name() string { return "arweave" }
@@ -42,6 +51,11 @@ func (t *Target) Name() string { return "arweave" }
 // 出错时返回「部分完成的记录」而不是 nil：已经上传成功的文件在里面有 id，
 // 调用方保存它之后，下次运行就能跳过这些文件，不会为已付费的内容再付一次。
 // 这一点比返回值语义的洁癖重要得多。
+//
+// 但「上传成功」在两条路上含义不同：Turbo 的 Upload 返回 id 就是真的传上去了；
+// L1 的 id 只是本地算出来的，代表「已打进 bundle 待提交」。
+// 所以 L1 下多一道 defer：只要最后那笔交易没提交成功，
+// 本轮新签的那些引用就全部撤掉，不管是从哪一步退出去的。
 func (t *Target) Publish(ctx context.Context, site *publish.Site, prev *publish.Record) (*publish.Record, error) {
 	l1 := t.TxSigner != nil
 	if !l1 && t.Uploader == nil {
@@ -67,21 +81,53 @@ func (t *Target) Publish(ctx context.Context, site *publish.Site, prev *publish.
 	// Turbo 模式下每签完一个就直接交给上传服务，攒的东西始终为空。
 	var pending [][]byte
 
+	// fresh 记下本轮新签、还没上链的路径。
+	//
+	// 这是 L1 特有的一件事：Turbo 那边 Upload 返回 id 就等于确实传上去了，
+	// 而 L1 的 id 只是本地算出来的，代表「已打进 bundle 待提交」。
+	// 那笔交易一旦提交失败，这些 id 在链上并不存在，
+	// 必须从记录里撤掉——否则下次发布会以为它们已经上链而跳过，
+	// 结果是站点里只剩一份清单、没有实际内容。
+	var fresh []string
+
 	// deliver 把一份签好的 data item 送出去，返回它的 id。
 	//
 	// 两条路取 id 的方式不同：Turbo 由上传服务返回，L1 没有服务可问，
 	// 只能按规范从签名字段自己算，而这个 id 会进 manifest，算错就全乱。
-	deliver := func(signed []byte) (string, error) {
+	// name 用于 L1 下登记「这份还没上链」，空串表示不登记（如 manifest）。
+	deliver := func(name string, signed []byte) (string, error) {
 		if l1 {
 			id, err := DataItemID(signed)
 			if err != nil {
 				return "", err
 			}
 			pending = append(pending, signed)
+			if name != "" {
+				fresh = append(fresh, name)
+			}
 			return id, nil
 		}
 		return t.Uploader.Upload(ctx, signed)
 	}
+
+	// L1 下不管从哪一步退出去，只要最后那笔交易没提交成功，
+	// 本轮新签的引用就都是无效的。
+	//
+	// 只写在「提交失败」那一条分支上不够：签名、算 id 都可能中途出错，
+	// 那些已经记进 rec 的引用同样没上链。实际就撞上过这种情况——
+	// 一个文件卡在签名上，前面几个的引用留了下来，下次发布就把它们跳过了。
+	submitted := false
+	defer func() {
+		if !l1 || submitted {
+			return
+		}
+		for _, p := range fresh {
+			delete(rec.Refs, p)
+			delete(rec.Files, p)
+		}
+		// 入口指向的 manifest 同样没上链，不能留下这个根。
+		rec.Root = ""
+	}()
 
 	var uploaded, reused int
 	for _, f := range site.Files {
@@ -110,7 +156,7 @@ func (t *Target) Publish(ctx context.Context, site *publish.Site, prev *publish.
 			return rec, fmt.Errorf("签名 %s 失败: %w", f.Path, err)
 		}
 
-		id, err := deliver(signed)
+		id, err := deliver(f.Path, signed)
 		if err != nil {
 			return rec, fmt.Errorf("提交 %s 失败: %w", f.Path, err)
 		}
@@ -141,7 +187,7 @@ func (t *Target) Publish(ctx context.Context, site *publish.Site, prev *publish.
 		if err != nil {
 			return rec, fmt.Errorf("签名发布记录失败: %w", err)
 		}
-		recordID, err := deliver(signedRecord)
+		recordID, err := deliver(t.RecordPath, signedRecord)
 		if err != nil {
 			return rec, fmt.Errorf("提交发布记录失败: %w", err)
 		}
@@ -160,7 +206,7 @@ func (t *Target) Publish(ctx context.Context, site *publish.Site, prev *publish.
 		return rec, fmt.Errorf("签名 manifest 失败: %w", err)
 	}
 
-	root, err := deliver(signedManifest)
+	root, err := deliver("", signedManifest)
 	if err != nil {
 		return rec, fmt.Errorf("提交 manifest 失败: %w", err)
 	}
@@ -173,23 +219,83 @@ func (t *Target) Publish(ctx context.Context, site *publish.Site, prev *publish.
 	// 体积不再卡在 256 KiB：超过一块时 SubmitBundle 会自动走分块协议，
 	// 先报交易再逐块补。
 	if l1 {
-		bundle := Bundle(pending)
-		tags := BundleTags(t.Repo)
-		sig, err := t.TxSigner.SignTx(ctx, bundle, tags)
-		if err != nil {
-			return rec, fmt.Errorf("签名交易失败: %w", err)
-		}
-		txID, err := SubmitBundle(ctx, t.Node, bundle, tags, sig, nil, t.logf)
-		if err != nil {
+		if err := t.submitL1(ctx, pending, root, reused); err != nil {
 			return rec, err
 		}
-		t.logf("打成一包 %d 个 data item（%d 字节），交易 %s；复用 %d 个，入口 %s",
-			len(pending), len(bundle), txID, reused, root)
+		submitted = true
 		return rec, nil
 	}
 
 	t.logf("上传 %d 个，复用 %d 个，入口 %s", uploaded, reused, root)
 	return rec, nil
+}
+
+// submitL1 走 L1 的收尾：签一笔以整包为 data 的交易，提交到节点。
+//
+// 这里面有一件事值得单独说：签名结果会先落到 PendingPath，提交成功再删。
+// 签名是用户在钱包里点过确认的动作，一次网络失败不该让它作废；
+// 留着它，下一次发布就能直接重传，不必再让人去钱包里点一遍。
+//
+// 抽成独立方法是为了能被单独测：直接走 Publish 会连带签一大堆 data item。
+func (t *Target) submitL1(ctx context.Context, pending [][]byte, root string, reused int) error {
+	bundle, err := Bundle(pending)
+	if err != nil {
+		return err
+	}
+	tags := BundleTags(t.Repo)
+
+	// 先看有没有上次签好但没提交成功的交易。包体没变，说明这份签名仍然对得上。
+	if p := LoadPending(t.PendingPath); p.SameBundle(bundle) {
+		t.logf("复用上次签好的交易（%d 字节），不必再签一次", len(bundle))
+		txID, err := SubmitBundle(ctx, t.Node, p.Bundle, p.Tags, p.Sig, t.Client, t.logf)
+		if err != nil {
+			return err
+		}
+		ClearPending(t.PendingPath)
+		t.logf("交易 %s；复用 %d 个，入口 %s", txID, reused, root)
+		return nil
+	}
+
+	sig, err := t.TxSigner.SignTx(ctx, bundle, tags)
+	if err != nil {
+		return fmt.Errorf("签名交易失败: %w", err)
+	}
+
+	// 页面已经提交过了，直接用它的 ID。
+	if sig.Uploaded {
+		// 把节点回的状态与 reward 一并记下。
+		//
+		// 「提交成功」只是节点受理了，真正上链要等区块确认，
+		// 那是几分钟之后的事。所以这里把交易 ID 明确打出来，
+		// 让用户能自己去查证——而不是由我们拿一个暂时查不到的状态
+		// 当成失败（刚 POST 完立刻问，往往就是查不到的）。
+		if sig.Status == 0 {
+			t.logf("交易 %s（页面已提交；节点暂时没回报状态，reward %s）", sig.ID, sig.Reward)
+		} else {
+			t.logf("交易 %s（页面已提交；节点状态 %d，reward %s）", sig.ID, sig.Status, sig.Reward)
+		}
+		t.logf("确认情况可查：%s/tx/%s", DefaultGateway, sig.ID)
+		ClearPending(t.PendingPath)
+		return nil
+	}
+
+	// 兑底：页面拿不到节点（或旧版页面只回传字段）时，走 Go 自己的提交。
+	// 签好就先落盘：万一提交失败，下一次就能直接重传。
+	// 落盘失败只提醒一句，不拦住发布——顶多是重试时要再签一次。
+	if err := SavePending(t.PendingPath, bundle, tags, sig); err != nil {
+		t.logf("! 待提交交易落盘失败，重试时需要重新签名: %v", err)
+	}
+
+	// client 传 t.Client：没配时 SubmitBundle 内部会按系统代理兑底。
+	txID, err := SubmitBundle(ctx, t.Node, bundle, tags, sig, t.Client, t.logf)
+	if err != nil {
+		return err
+	}
+	ClearPending(t.PendingPath)
+
+	t.logf("打成一包 %d 个 data item（%d 字节），交易 %s；复用 %d 个，入口 %s",
+		len(pending), len(bundle), txID, reused, root)
+	return nil
 }
 
 // EntryPath 返回默认入口路径，通常是站点根下的 index.html。

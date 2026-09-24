@@ -17,7 +17,16 @@ import (
 	"github.com/LWDJD/read-only-git/internal/publish"
 )
 
+// minSignedItem 是 DataItemID 能解析的最小字节数。
+//
+// 它从签名字段（偏移 2 到 514）里取数据，所以数据 item 撑不到这个长度
+// 就算不出 id。而 manifest 这类内容本身很短。
+const minSignedItem = 600
+
 // stubSigner 是假的签名通道：给内容加个前缀充当「签名结果」。
+//
+// 末尾补到 minSignedItem：不补的话，短内容（如 manifest）的数据 item
+// 撑不到签名段，测试会在一个与题意无关的地方刷错。
 type stubSigner struct {
 	mu    sync.Mutex
 	calls int
@@ -27,9 +36,13 @@ func (s *stubSigner) Sign(ctx context.Context, data []byte, tags []Tag) ([]byte,
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls++
-	out := make([]byte, 0, len(data)+7)
+	out := make([]byte, 0, minSignedItem)
 	out = append(out, "signed:"...)
-	return append(out, data...), nil
+	out = append(out, data...)
+	for len(out) < minSignedItem {
+		out = append(out, 0)
+	}
+	return out, nil
 }
 
 func (s *stubSigner) count() int {

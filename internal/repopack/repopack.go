@@ -32,11 +32,24 @@ const stateDir = ".rog"
 
 // Options 是一次打包的输入。
 type Options struct {
-	Source      string                           // 源仓库：本地路径，或 https/git/ssh/file 与 scp 风格地址
-	OutDir      string                           // 站点根目录，即放着 index.html 的那个
-	Name        string                           // 对外标识；留空则从源推导
-	Incremental bool                             // 目标已存在时做增量更新而非重建
-	Logf        func(format string, args ...any) // 日志回调，可为 nil
+	Source string                           // 源仓库：本地路径，或 https/git/ssh/file 与 scp 风格地址
+	OutDir string                           // 站点根目录，即放着 index.html 的那个
+	Name   string                           // 对外标识；留空则从源推导
+	Logf   func(format string, args ...any) // 日志回调，可为 nil
+
+	// Proxy 是 git 拉远端仓库时用的代理，形如 http://127.0.0.1:7890。
+	//
+	// 本地源用不上它。为空时 git 跟着自己的配置与环境走。
+	Proxy string
+
+	// Rebuild 为真时丢掉已有产物，从零重建。
+	//
+	// 默认是全自动的：目标里已经有一个能用的仓库就做增量（保留旧 pack，
+	// 内容寻址的旧数据才能复用），没有就全量。原先把这个选择交给调用方
+	// 是个错位——该不该增量取决于磁盘上有没有旧 pack，
+	// 而这个事实工具自己最清楚，让用户猜只会得到两种坏结果：
+	// 该增量时他选了全量（白传一遍），或反过来选了增量但根本没有旧数据。
+	Rebuild bool
 }
 
 // Result 描述一次打包的产物。
@@ -145,9 +158,18 @@ func Pack(opt Options) (*Result, error) {
 
 	logf("源仓库   %s", opt.Source)
 	logf("目标     %s", target)
+	if opt.Proxy != "" {
+		logf("代理     %s", opt.Proxy)
+	}
+	// 代理只对拉远端仓库有意义，本地源用不上它。
+	defer setGitProxy(opt.Proxy)()
 
-	// 增量只对「本地源 + 目标可安全复用」生效，否则退回全量重建。
-	incremental := opt.Incremental && !remote && isUsableTarget(target)
+	// 默认自动：目标已经是一个能用的仓库就增量，否则全量重建。
+	// 远端源（clone）不参与增量，它没有本地旧 pack 可复用。
+	incremental := !opt.Rebuild && !remote && isUsableTarget(target)
+	if opt.Rebuild && !remote {
+		logf("> 完整重打包：忽略已有产物")
+	}
 
 	if err := os.MkdirAll(outRoot, 0o755); err != nil {
 		return nil, err
@@ -177,10 +199,7 @@ func Pack(opt Options) (*Result, error) {
 		via = "incremental"
 
 	case remote:
-		if opt.Incremental {
-			logf("! 远端源暂不支持增量，本次按全量处理")
-		}
-		logf("> 从远端克隆")
+		logf("> 从远端克隆（远端源不做增量）")
 		if _, err := runGit("", "clone", "--bare", "--quiet", opt.Source, target); err != nil {
 			os.RemoveAll(target)
 			return nil, fmt.Errorf("%w\n  检查地址是否写对、网络是否可达。\n  私有仓库需要先让 git 自己拿到凭据", err)
@@ -620,10 +639,37 @@ func gitArgs(cmd ...string) []string {
 	return append(out, cmd...)
 }
 
+// gitProxy 是拉远端仓库时给 git 用的代理地址。
+//
+// 为什么用环境变量而不是 -c http.proxy：-c 要拼进每一条命令，
+// 而 runGit 的调用点有二十多个；环境变量在这里只影响 git 自己，
+// 而 git 只在需要走网络时才用代理，本地的仓库操作不受影响。
+//
+// 为什么是包级变量：它只在 Pack 开头设置一次，而 Pack 全程被文件锁
+// 串行化，不存在并发改写。把它层层传下去只会让二十几个调用点
+// 都多一个恒为空的参数。
+var gitProxy string
+
+// setGitProxy 设一次本次打包要用的代理，返回恢复函数。
+func setGitProxy(url string) func() {
+	prev := gitProxy
+	gitProxy = strings.TrimSpace(url)
+	return func() { gitProxy = prev }
+}
+
 func runGit(dir string, args ...string) (string, error) {
 	cmd := exec.Command("git", args...)
 	if dir != "" {
 		cmd.Dir = dir
+	}
+	if gitProxy != "" {
+		// 大小写都给：不同平台的 git 与 libcurl 认的名字不完全一致
+		cmd.Env = append(os.Environ(),
+			"http_proxy="+gitProxy,
+			"https_proxy="+gitProxy,
+			"HTTP_PROXY="+gitProxy,
+			"HTTPS_PROXY="+gitProxy,
+		)
 	}
 	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout

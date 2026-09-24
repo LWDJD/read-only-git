@@ -9,7 +9,6 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"time"
 )
 
 // DefaultNode 是提交交易用的节点。
@@ -61,6 +60,22 @@ type TxSignature struct {
 	// Proofs 是各块的 Merkle 证明，按块序排列，只在需要分块时用得上。
 	// 单块时 /tx 直接带 data，节点自己会算，用不着它。
 	Proofs []ChunkProof `json:"proofs,omitempty"`
+	// Uploaded 表示这份交易已经由签名页自己提交上链了。
+	//
+	// 署名与提交在同一边完成时，就不存在「两处拼出来的 JSON 是否等价」
+	// 这个问题——这也正是把提交交给 arweave-js 的理由。
+	// 为 true 时 Go 侧不重复提交，直接用 ID。
+	Uploaded bool `json:"uploaded,omitempty"`
+	// Status 是提交后节点给出的状态码（200/202 表示节点手里有它）。
+	// 仅用于写日志：事后翻的时候这个值比什么都直接。
+	Status int `json:"status,omitempty"`
+	// PostStatus 是 POST /tx 那一刻节点回的状态码。
+	// 与 Status 不同：那是「节点受理了吗」，这是「事后还查得到吗」。
+	// 实测碰上过前者 2xx、后者 404 的情况，两个都得看。
+	PostStatus int `json:"postStatus,omitempty"`
+	// PostBody 是 POST /tx 的响应原话（截断）。
+	// 节点拒绝或丢弃时，原因就写在这里。
+	PostBody string `json:"postBody,omitempty"`
 }
 
 // TxSigner 是交易签名通道：把 bundle 与 tags 交给钱包，拿回交易的签名字段。
@@ -130,7 +145,7 @@ func txPayload(data []byte, tags []Tag, sig *TxSignature) ([]byte, error) {
 		ID:        sig.ID,
 		LastTx:    sig.LastTx,
 		Owner:     sig.Owner,
-		Tags:      tags,
+		Tags:      encodeTxTags(tags),
 		Target:    "",
 		Quantity:  "0",
 		Data:      base64.RawURLEncoding.EncodeToString(data),
@@ -140,6 +155,31 @@ func txPayload(data []byte, tags []Tag, sig *TxSignature) ([]byte, error) {
 		Signature: sig.Signature,
 	}
 	return json.Marshal(tx)
+}
+
+// encodeTxTags 把 tags 编成交易 JSON 里的形式。
+//
+// 这里反直觉：交易 JSON 里的 tags **不是明文**，name 与 value 都要 base64url。
+// 根据是 arweave-js 的实现：addTag 先编码再存
+//
+//	this.tags.push(new Tag(stringToB64Url(name), stringToB64Url(value)))
+//
+// 而 toJSON() 原样输出这份内部表示。节点按 base64url 解，
+// 发明文会被它解成乱码并直接拒掉（报的就是 Invalid JSON）。
+//
+// 注意只在交易 JSON 里编码。data item（ANS-104）的 tags 是明文 UTF-8，
+// 那一条路走钱包的 signDataItem，两者不是一回事，不要一起改。
+//
+// tags 为空时返回空切片而不是 nil：节点对 `"tags":null` 也不客气。
+func encodeTxTags(tags []Tag) []Tag {
+	out := make([]Tag, 0, len(tags))
+	for _, t := range tags {
+		out = append(out, Tag{
+			Name:  base64.RawURLEncoding.EncodeToString([]byte(t.Name)),
+			Value: base64.RawURLEncoding.EncodeToString([]byte(t.Value)),
+		})
+	}
+	return out
 }
 
 // nodeError 是节点返回的非 2xx 响应。
@@ -160,9 +200,7 @@ func (e *nodeError) Error() string {
 //
 // 非 2xx 时同样返回响应体，调用方可以用它判断是否值得重试。
 func postJSON(ctx context.Context, node, path string, body []byte, client *http.Client) ([]byte, error) {
-	if client == nil {
-		client = &http.Client{Timeout: 10 * time.Minute}
-	}
+	client = clientOrDefault(client)
 	url := strings.TrimRight(node, "/") + path
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {

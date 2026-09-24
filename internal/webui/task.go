@@ -2,6 +2,11 @@ package webui
 
 import (
 	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -32,6 +37,12 @@ type Task struct {
 	started time.Time
 	ended   time.Time
 
+	// sink 非空时日志同时写一份到磁盘。
+	//
+	// 为什么要有它：界面上的日志一刷新就没了，而「发布失败」这类事
+	// 往往要事后回头查——过了那一瞬就什么都追不回来。
+	sink io.WriteCloser
+
 	subs map[chan string]struct{}
 }
 
@@ -53,6 +64,11 @@ func (t *Task) Logf(format string, args ...any) {
 
 	t.mu.Lock()
 	t.logs = append(t.logs, line)
+	if t.sink != nil {
+		// 落盘失败不能影响任务本身，所以不检查错误：
+		// 日志是辅助，不是主流程。
+		_, _ = fmt.Fprintln(t.sink, line)
+	}
 	subs := make([]chan string, 0, len(t.subs))
 	for ch := range t.subs {
 		subs = append(subs, ch)
@@ -72,6 +88,10 @@ func (t *Task) succeed(result any) {
 	t.status = StatusDone
 	t.result = result
 	t.ended = time.Now()
+	if t.sink != nil {
+		_, _ = fmt.Fprintln(t.sink, "完成")
+	}
+	t.closeSinkLocked()
 	subs := t.takeSubsLocked()
 	t.mu.Unlock()
 
@@ -85,12 +105,27 @@ func (t *Task) fail(err error) {
 	t.status = StatusFailed
 	t.errMsg = err.Error()
 	t.ended = time.Now()
+	if t.sink != nil {
+		// 失败原因不走 Logf，所以这里得自己补一笔。
+		// 不写的话日志文件里只剩个开头，正是最想看的那句不在。
+		_, _ = fmt.Fprintf(t.sink, "失败：%s\n", t.errMsg)
+	}
+	t.closeSinkLocked()
 	subs := t.takeSubsLocked()
 	t.mu.Unlock()
 
 	for _, ch := range subs {
 		close(ch)
 	}
+}
+
+// closeSinkLocked 收尾时把日志文件关掉。调用方持锁。
+func (t *Task) closeSinkLocked() {
+	if t.sink == nil {
+		return
+	}
+	_ = t.sink.Close()
+	t.sink = nil
 }
 
 // takeSubsLocked 取走并清空订阅者列表，调用方负责在锁外关闭通道。
@@ -182,10 +217,24 @@ type Store struct {
 	mu    sync.Mutex
 	tasks map[string]*Task
 	seq   int64
+	// logDir 非空时，每个任务的日志同时写一份到这里。
+	logDir string
+	// retain 是保留多少份历史日志，超出就删最旧的。
+	retain int
 }
 
 func NewStore() *Store {
-	return &Store{tasks: make(map[string]*Task)}
+	return &Store{tasks: make(map[string]*Task), retain: 50}
+}
+
+// SetLogDir 打开日志落盘。
+//
+// 为什么不在这里报错：日志是辅助能力，目录建不出来最多是这次的
+// 任务没有文件，不该因此把整个界面拦住。
+func (s *Store) SetLogDir(dir string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.logDir = dir
 }
 
 // Run 建一个任务并异步执行它，返回任务 id。
@@ -194,6 +243,10 @@ func (s *Store) Run(kind string, fn func(*Task)) string {
 	s.seq++
 	id := fmt.Sprintf("%s-%d", kind, s.seq)
 	t := newTask(id, kind)
+	if f := s.openLogFileLocked(id, kind); f != nil {
+		t.sink = f
+		t.logs = append(t.logs, "日志文件已开，出问题时可以回头翻")
+	}
 	s.tasks[id] = t
 	s.mu.Unlock()
 
@@ -214,4 +267,48 @@ func (s *Store) Get(id string) *Task {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.tasks[id]
+}
+
+// openLogFileLocked 为一次任务开一个日志文件。调用方持锁。
+//
+// 文件名以时间开头，字典序就是时间序，清理旧文件时直接按名字排即可。
+func (s *Store) openLogFileLocked(id, kind string) io.WriteCloser {
+	if s.logDir == "" {
+		return nil
+	}
+	if err := os.MkdirAll(s.logDir, 0o755); err != nil {
+		return nil
+	}
+	s.pruneLogsLocked()
+
+	name := time.Now().Format("2006-01-02_15-04-05") + "_" + kind + ".log"
+	f, err := os.Create(filepath.Join(s.logDir, name))
+	if err != nil {
+		return nil
+	}
+	_, _ = fmt.Fprintf(f, "# 任务 %s（%s）开始于 %s\n", id, kind, time.Now().Format("2006-01-02 15:04:05"))
+	return f
+}
+
+// pruneLogsLocked 只留最近 retain 份日志。调用方持锁。
+//
+// 认不出目录内容就算了：这是清理，不是主流程，失败不影响什么。
+func (s *Store) pruneLogsLocked() {
+	entries, err := os.ReadDir(s.logDir)
+	if err != nil {
+		return
+	}
+	var names []string
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".log") {
+			names = append(names, e.Name())
+		}
+	}
+	if len(names) < s.retain {
+		return
+	}
+	sort.Strings(names)
+	for _, n := range names[:len(names)-s.retain+1] {
+		_ = os.Remove(filepath.Join(s.logDir, n))
+	}
 }

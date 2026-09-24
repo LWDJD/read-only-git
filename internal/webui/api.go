@@ -3,7 +3,9 @@ package webui
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -14,7 +16,6 @@ import (
 	"github.com/LWDJD/read-only-git/internal/arweave"
 	"github.com/LWDJD/read-only-git/internal/publish"
 	"github.com/LWDJD/read-only-git/internal/repopack"
-	"github.com/LWDJD/read-only-git/internal/signer"
 	"github.com/LWDJD/read-only-git/internal/sitekit"
 )
 
@@ -117,14 +118,14 @@ type scaffoldState struct {
 }
 
 type stateResponse struct {
-	Site      string          `json:"site"`
-	Exists    bool            `json:"exists"`
-	Files     []fileState     `json:"files"`
-	TotalSize int64           `json:"totalSize"`
-	Repos     []repoState     `json:"repos"`
-	Records   []recordState   `json:"records"`
-	Scaffold  scaffoldState   `json:"scaffold"`
-	Error     string          `json:"error,omitempty"`
+	Site      string        `json:"site"`
+	Exists    bool          `json:"exists"`
+	Files     []fileState   `json:"files"`
+	TotalSize int64         `json:"totalSize"`
+	Repos     []repoState   `json:"repos"`
+	Records   []recordState `json:"records"`
+	Scaffold  scaffoldState `json:"scaffold"`
+	Error     string        `json:"error,omitempty"`
 }
 
 func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
@@ -256,10 +257,17 @@ func readRecords(site string) []recordState {
 // ---------- 打包 ----------
 
 type packRequest struct {
-	Source      string `json:"source"`
-	OutDir      string `json:"outDir"`
-	Name        string `json:"name"`
-	Incremental bool   `json:"incremental"`
+	Source string `json:"source"`
+	OutDir string `json:"outDir"`
+	Name   string `json:"name"`
+	// Rebuild 为真时忽略已有产物，从零重建。
+	// 默认不填就是自动：目标里已有这个仓库就增量，否则全量。
+	Rebuild bool `json:"rebuild"`
+	// Proxy 是拉远端仓库时给 git 用的代理地址。
+	//
+	// 单独一个字段，与发布时的 http 代理分开：拉取用 git，
+	// 上传用 Go 自己的 client，两者走的是不同的通道。
+	Proxy string `json:"proxy"`
 }
 
 func (s *Server) handlePack(w http.ResponseWriter, r *http.Request) {
@@ -274,11 +282,12 @@ func (s *Server) handlePack(w http.ResponseWriter, r *http.Request) {
 
 	id := s.tasks.Run("pack", func(t *Task) {
 		res, err := repopack.Pack(repopack.Options{
-			Source:      req.Source,
-			OutDir:      req.OutDir,
-			Name:        req.Name,
-			Incremental: req.Incremental,
-			Logf:        t.Logf,
+			Source:  req.Source,
+			OutDir:  req.OutDir,
+			Name:    req.Name,
+			Rebuild: req.Rebuild,
+			Proxy:   req.Proxy,
+			Logf:    t.Logf,
 		})
 		if err != nil {
 			t.fail(err)
@@ -298,15 +307,29 @@ func (s *Server) handlePack(w http.ResponseWriter, r *http.Request) {
 
 // ---------- 发布 ----------
 
+// repoNameFor 从站点目录名推出仓库名。
+//
+// 界面上不再提供这一栏。一个站点对应一个仓库，站点目录名就是它的名字：
+// 让它可填只会多一个能填错的地方，而填错的代价是产物里的 Repo 标签
+// 与发布记录的身份一起错，这两样都不该由人在界面上临时决定。
+//
+// CLI 那边仍可用 --repo 显式覆盖，那是脚本场景，不是随手填。
+func repoNameFor(siteRoot string) string {
+	return filepath.Base(filepath.Clean(siteRoot))
+}
+
 type publishRequest struct {
 	Site     string `json:"site"`
 	Target   string `json:"target"` // local / turbo / l1
 	Dest     string `json:"dest"`   // local 用
-	Repo     string `json:"repo"`
 	Endpoint string `json:"endpoint"`
 	Node     string `json:"node"`
 	From     string `json:"from"`
 	Gateway  string `json:"gateway"`
+	// ProxyMode 是网络出口：system（默认，跟随系统设置）/ manual / off。
+	ProxyMode string `json:"proxyMode"`
+	// ProxyURL 只在 manual 模式下用到。
+	ProxyURL string `json:"proxyUrl"`
 }
 
 func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
@@ -391,21 +414,27 @@ func (s *Server) publishLocal(t *Task, site *publish.Site, req publishRequest) e
 }
 
 func (s *Server) publishArweave(t *Task, site *publish.Site, req publishRequest, useL1 bool) error {
-	repo := req.Repo
-	if strings.TrimSpace(repo) == "" {
-		repo = filepath.Base(site.Root)
-	}
+	repo := repoNameFor(site.Root)
 
-	svc := signer.New([]byte(signer.DefaultPage))
-	if err := svc.Start(); err != nil {
+	// 一个 client 贯穿整轮发布：报交易、逐块 /chunk、取记录都走它。
+	// 分开造的话，代理设置很容易只对其中几步生效。
+	mode, err := arweave.ParseProxyMode(req.ProxyMode)
+	if err != nil {
 		return err
 	}
-	defer svc.Close()
+	if mode == arweave.ProxyManual && strings.TrimSpace(req.ProxyURL) == "" {
+		return fmt.Errorf("手动代理模式需要填代理地址")
+	}
+	client, err := arweave.NewClient(arweave.ProxyConfig{Mode: mode, URL: req.ProxyURL}, 0)
+	if err != nil {
+		return err
+	}
 
-	// 立刻把签名页地址交给前端，用户不必去日志里找
-	t.SetData("signUrl", svc.URL())
-	t.Logf("签名页 %s", svc.URL())
-	t.Logf("请在浏览器里打开它并连接钱包")
+	// 签名通道就是挂在 webui /sign/ 下的那一个。
+	//
+	// 不再另起服务、不再另开页面：用户就在当前页面里确认钱包。
+	// 同时也不再往日志里打一个「签名页 <地址>」——那个地址现在不存在了。
+	svc := s.sign
 
 	statePath := publish.StatePath(site.Root, "arweave", repo)
 	prev, err := publish.LoadRecord(statePath)
@@ -415,8 +444,8 @@ func (s *Server) publishArweave(t *Task, site *publish.Site, req publishRequest,
 	}
 
 	if req.From != "" {
-		fetched, ferr := arweave.FetchRecord(context.Background(), req.Gateway, req.From,
-			publish.RecordRelPath("arweave", repo))
+		fetched, ferr := arweave.FetchRecordWithClient(context.Background(), req.Gateway, req.From,
+			publish.RecordRelPath("arweave", repo), client)
 		if ferr != nil {
 			return ferr
 		}
@@ -431,18 +460,24 @@ func (s *Server) publishArweave(t *Task, site *publish.Site, req publishRequest,
 		Repo:       repo,
 		Signer:     svc,
 		RecordPath: publish.RecordRelPath("arweave", repo),
-		Logf:       t.Logf,
+		// 签好但没提交成功的交易落在这里，重试时直接复用，
+		// 不必再让用户去钱包里点一次。
+		PendingPath: publish.PendingPath(site.Root, "arweave", repo),
+		Client:      client,
+		Logf:        t.Logf,
 	}
 	if useL1 {
 		target.TxSigner = svc
 		target.Node = req.Node
 	} else {
-		target.Uploader = arweave.NewUploader(req.Endpoint)
+		target.Uploader = arweave.NewUploaderWithClient(req.Endpoint, client)
 	}
 
 	// 给整轮等签名加个上限：用户关掉页面时不该把进程永久挂住
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
+
+	t.Logf("等待钱包确认（在页面右上角连接钱包后会自动逐个弹出）")
 
 	rec, err := target.Publish(ctx, site, prev)
 	if rec != nil {
@@ -451,6 +486,11 @@ func (s *Server) publishArweave(t *Task, site *publish.Site, req publishRequest,
 		}
 	}
 	if err != nil {
+		// 超时这一句要说清：它会以 context.DeadlineExceeded 的形式上来，
+		// 而那句话看不出到底卡在哪。实际上卡的就是等钱包。
+		if errors.Is(err, context.DeadlineExceeded) {
+			return fmt.Errorf("等钱包签名超时（30 分钟）。页面可能关了、或者签名一直没有完成")
+		}
 		return err
 	}
 
@@ -578,37 +618,61 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 
 // ---------- 文件 ----------
 
-type replaceRequest struct {
-	Site  string `json:"site"`
+type replaceFile struct {
 	Path  string `json:"path"`
 	Bytes []byte `json:"bytes"` // JSON 里是 base64
 }
 
+type replaceRequest struct {
+	Site  string        `json:"site"`
+	Files []replaceFile `json:"files"`
+}
+
+type replaceResult struct {
+	Path  string `json:"path"`
+	Size  int    `json:"size,omitempty"`
+	Error string `json:"error,omitempty"`
+}
+
+// handleFileReplace 批量写入文件。
+//
+// 界面一次可能拖进来多个文件与整个目录，逐个发请求既慢又要处理半途失败，
+// 所以一次收全。「重名该覆盖还是跳过」在界面侧已经问过用户了，这里只管写。
+//
+// 一个文件写失败不影响其余：每个都单独报告结果，前端照实显示。
 func (s *Server) handleFileReplace(w http.ResponseWriter, r *http.Request) {
 	var req replaceRequest
 	if !decodeBody(w, r, &req) {
 		return
 	}
 	site := siteOf(s, req.Site)
+	if len(req.Files) == 0 {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("没有要写入的文件"))
+		return
+	}
 
-	full, err := safeJoin(site, req.Path)
+	results := make([]replaceResult, 0, len(req.Files))
+	for _, f := range req.Files {
+		if err := s.writeSiteFile(site, f.Path, f.Bytes); err != nil {
+			results = append(results, replaceResult{Path: f.Path, Error: err.Error()})
+			continue
+		}
+		results = append(results, replaceResult{Path: f.Path, Size: len(f.Bytes)})
+	}
+
+	writeJSON(w, map[string]any{"ok": true, "results": results})
+}
+
+// writeSiteFile 写一个站点内的文件，路径越界一律拒绝。
+func (s *Server) writeSiteFile(site, rel string, data []byte) error {
+	full, err := safeJoin(site, rel)
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, err)
-		return
+		return err
 	}
-
 	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
-		writeErr(w, http.StatusInternalServerError, err)
-		return
+		return err
 	}
-	if err := os.WriteFile(full, req.Bytes, 0o644); err != nil {
-		writeErr(w, http.StatusInternalServerError, err)
-		return
-	}
-
-	// 写完就结束，什么都不记。后续的打包与发布自己会重新扫描、重算摘要，
-	// 所以绕过界面直接改目录同样能被正确识别。
-	writeJSON(w, map[string]any{"ok": true, "path": req.Path, "size": len(req.Bytes)})
+	return os.WriteFile(full, data, 0o644)
 }
 
 type deleteRequest struct {
@@ -616,6 +680,10 @@ type deleteRequest struct {
 	Path string `json:"path"`
 }
 
+// handleFileDelete 删掉一个文件或一整个目录。
+//
+// 目录用 RemoveAll 递归删。这个动作不能撤销，所以界面那边必须先问过用户；
+// 这里只负责执行，并把删了什么东西说清楚。
 func (s *Server) handleFileDelete(w http.ResponseWriter, r *http.Request) {
 	var req deleteRequest
 	if !decodeBody(w, r, &req) {
@@ -628,7 +696,195 @@ func (s *Server) handleFileDelete(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
+	// 别把站点根自己删了：那一下会把整个站点连同 .rog 一起清掉
+	if sameFile(full, site) {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("不能删除站点根目录"))
+		return
+	}
+
+	info, err := os.Stat(full)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, err)
+		return
+	}
+
+	if info.IsDir() {
+		if err := os.RemoveAll(full); err != nil {
+			writeErr(w, http.StatusInternalServerError, err)
+			return
+		}
+		writeJSON(w, map[string]any{"ok": true, "path": req.Path, "dir": true})
+		return
+	}
+
 	if err := os.Remove(full); err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "path": req.Path})
+}
+
+// sameFile 判断两个路径是不是同一个位置。
+func sameFile(a, b string) bool {
+	fa, err1 := filepath.Abs(a)
+	fb, err2 := filepath.Abs(b)
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	return strings.EqualFold(filepath.Clean(fa), filepath.Clean(fb))
+}
+
+type copyRequest struct {
+	Site string   `json:"site"`
+	From []string `json:"from"` // 源路径（相对站点根）
+	To   string   `json:"to"`   // 目标目录（相对站点根），空串表示根
+}
+
+// handleFileCopy 把一批文件或目录复制到另一个目录里。
+//
+// 与拖入同一条思路：目标就是「那个目录」，不是某个文件，
+// 重不重名由调用方（界面）先问过用户。
+//
+// 同名时在这里直接覆盖：界面已经把选择交代给用户了，
+// 再一次静默跳过反而会让人以为复制成功了。
+func (s *Server) handleFileCopy(w http.ResponseWriter, r *http.Request) {
+	var req copyRequest
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	site := siteOf(s, req.Site)
+	if len(req.From) == 0 {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("没有指定要复制的东西"))
+		return
+	}
+
+	dstDir, err := safeJoin(site, req.To)
+	if err != nil {
+		// 空 to 表示站点根
+		if strings.TrimSpace(req.To) != "" {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		dstDir = site
+	}
+	if err := os.MkdirAll(dstDir, 0o755); err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	results := make([]replaceResult, 0, len(req.From))
+	for _, rel := range req.From {
+		src, err := safeJoin(site, rel)
+		if err != nil {
+			results = append(results, replaceResult{Path: rel, Error: err.Error()})
+			continue
+		}
+		name := filepath.Base(filepath.Clean(src))
+		dst := filepath.Join(dstDir, name)
+
+		// 复制到它自己所在的目录里，等于原地不动，没意义
+		if sameFile(src, dst) {
+			results = append(results, replaceResult{Path: rel, Error: "源与目标相同"})
+			continue
+		}
+		// 不允许把目录复制进它自己的子目录：那会无限递归
+		if inside(src, dst) {
+			results = append(results, replaceResult{Path: rel, Error: "不能把目录复制进它自己里面"})
+			continue
+		}
+
+		if err := copyTree(src, dst); err != nil {
+			results = append(results, replaceResult{Path: rel, Error: err.Error()})
+			continue
+		}
+		rel2, _ := filepath.Rel(site, dst)
+		results = append(results, replaceResult{Path: filepath.ToSlash(rel2)})
+	}
+
+	writeJSON(w, map[string]any{"ok": true, "results": results})
+}
+
+// inside 判断 child 是否在 parent 里面（含自身）。
+func inside(parent, child string) bool {
+	pa, err1 := filepath.Abs(parent)
+	ca, err2 := filepath.Abs(child)
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	rel, err := filepath.Rel(pa, ca)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (!strings.HasPrefix(rel, "..") && !filepath.IsAbs(rel))
+}
+
+// copyTree 递归复制文件或目录。
+func copyTree(src, dst string) error {
+	info, err := os.Stat(src)
+	if err != nil {
+		return err
+	}
+
+	if !info.IsDir() {
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			return err
+		}
+		return copyFile(src, dst, info.Mode())
+	}
+
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if err := copyTree(filepath.Join(src, e.Name()), filepath.Join(dst, e.Name())); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func copyFile(src, dst string, mode os.FileMode) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode.Perm())
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	_, err = io.Copy(out, in)
+	return err
+}
+
+type mkdirRequest struct {
+	Site string `json:"site"`
+	Path string `json:"path"`
+}
+
+// handleFileMkdir 新建一个目录。
+//
+// 资源管理器总得能建目录，否则「把文件整理到子目录里」这件事就做不了。
+func (s *Server) handleFileMkdir(w http.ResponseWriter, r *http.Request) {
+	var req mkdirRequest
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	site := siteOf(s, req.Site)
+
+	full, err := safeJoin(site, req.Path)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := os.MkdirAll(full, 0o755); err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}

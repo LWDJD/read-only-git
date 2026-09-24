@@ -15,9 +15,13 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/LWDJD/read-only-git/internal/publish"
+	"github.com/LWDJD/read-only-git/internal/signer"
 )
 
 // Server 是本机 webui 服务。
@@ -26,6 +30,11 @@ type Server struct {
 	port    int
 	token   string
 	tasks   *Store
+	// sign 是签名通道。
+	//
+	// 它原本是一个独立服务（另起端口、另开页面），现在挂在 webui 自己的
+	// mux 下：发布时用户就在当前页面里确认钱包，不必来回切标签页。
+	sign *signer.Service
 
 	listener net.Listener
 	server   *http.Server
@@ -36,12 +45,26 @@ type Server struct {
 // siteDir 是默认操作的站点目录；port 为 0 时由系统挑一个空闲端口，
 // 传具体值时固定监听该端口，方便反复访问同一个地址。
 func New(siteDir string, port int) *Server {
-	return &Server{
+	s := &Server{
 		siteDir: siteDir,
 		port:    port,
 		token:   newToken(),
 		tasks:   NewStore(),
 	}
+	// 签名通道与 webui 共用一个 token：请求进 webui 时已经验过一遍，
+	// 再验一次只会让页面需要同时持有两个。
+	//
+	// 不传页面：签名逻辑内联在 webui 自己的页面里，
+	// 这里只要那几个端点（/api/next、/api/blob、/api/sign）。
+	s.sign = signer.New(nil)
+	s.sign.SetToken(s.token)
+
+	// 任务日志同时落一份到站点的 .rog/logs 下。
+	//
+	// 发布这种事往往要事后回头查，而界面上的日志一刷新就没了。
+	// 放在 .rog 里与发布记录同一个地方，它也整体不进版本库、不参与发布。
+	s.tasks.SetLogDir(filepath.Join(siteDir, publish.StateDir, "logs"))
+	return s
 }
 
 // newToken 生成一个随机的会话 token。
@@ -79,7 +102,17 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/api/restore", s.guard(s.handleRestore))
 	mux.HandleFunc("/api/files/replace", s.guard(s.handleFileReplace))
 	mux.HandleFunc("/api/files/delete", s.guard(s.handleFileDelete))
+	mux.HandleFunc("/api/files/copy", s.guard(s.handleFileCopy))
+	mux.HandleFunc("/api/files/mkdir", s.guard(s.handleFileMkdir))
 	mux.HandleFunc("/api/task/", s.guard(s.handleTask))
+
+	// 签名端点挂在 /sign/ 下。StripPrefix 之后，请求路径与 signer 自己的
+	// 路由表一模一样（/api/next、/api/blob/<id>、/api/sign/<id>、/vendor/arweave.js），
+	// 所以 CLI 那条路与这里共用同一套实现。
+	//
+	// 外面不套 webui 的 guard：signer 自己的 guard 已经在校验，
+	// 而两边 token 相同，套两层只是多一次无意义的字符串比较。
+	mux.Handle("/sign/", http.StripPrefix("/sign", s.sign.Routes()))
 
 	s.server = &http.Server{
 		Handler:           mux,
@@ -166,12 +199,47 @@ func (s *Server) handleTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// /api/task/<id>/note：把前端的一条消息记进任务日志。
+	//
+	// 为什么需要它：界面上那些话（尤其是「签名失败：…」）是前端写的，
+	// 而日志文件只收后端的 Logf。结果就是出了事翻日志，
+	// 最关键的那句偏偏不在。两边合成一条才能事后回溯。
+	if id, ok := strings.CutSuffix(rest, "/note"); ok {
+		s.handleTaskNote(w, r, id)
+		return
+	}
+
 	t := s.tasks.Get(rest)
 	if t == nil {
 		writeErr(w, http.StatusNotFound, fmt.Errorf("没有这个任务: %s", rest))
 		return
 	}
 	writeJSON(w, t.Snapshot())
+}
+
+// handleTaskNote 把前端的一条消息记进任务日志。
+//
+// 只接受一行文字，不做什么解释：前端已经把话组织好了，
+// 这里只负责让它落到同一个地方（界面 + 日志文件）。
+func (s *Server) handleTaskNote(w http.ResponseWriter, r *http.Request, id string) {
+	t := s.tasks.Get(id)
+	if t == nil {
+		writeErr(w, http.StatusNotFound, fmt.Errorf("没有这个任务: %s", id))
+		return
+	}
+	var req struct {
+		Line string `json:"line"`
+	}
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	line := strings.TrimSpace(req.Line)
+	if line == "" {
+		writeJSON(w, map[string]any{"ok": true})
+		return
+	}
+	t.Logf("[页面] %s", line)
+	writeJSON(w, map[string]any{"ok": true})
 }
 
 func (s *Server) streamTask(w http.ResponseWriter, r *http.Request, id string) {

@@ -132,6 +132,18 @@ func SubmitBundle(ctx context.Context, node string, data []byte, tags []Tag, sig
 		return "", fmt.Errorf("缺少签名字段")
 	}
 
+	// 提交前把参与签名的字段摘要记一笔。
+	//
+	// arweave 的 format 2 交易，签名输入是
+	// [format, owner, target, quantity, reward, last_tx, tags, data_size, data_root]，
+	// 节点报 Transaction verification failed 时，光看那句错误看不出是哪一项对不上，
+	// 而下面这几项恰好是其中最容易对不上的部分。只报块数与长度，不打内容。
+	if logf != nil {
+		logf("交易摘要：块数=%d data=%d data_size=%s data_root=%s(%d) reward=%s last_tx=%s",
+			len(sig.Proofs), len(data), DataSizeOf(sig, data),
+			truncate(sig.DataRoot, 10), len(sig.DataRoot), sig.Reward, truncate(sig.LastTx, 10))
+	}
+
 	// 装得下就一步到位，不必走分块
 	if len(sig.Proofs) <= 1 {
 		return SubmitTx(ctx, node, data, tags, sig, client)
