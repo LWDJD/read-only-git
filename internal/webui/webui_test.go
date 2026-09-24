@@ -11,12 +11,14 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/LWDJD/read-only-git/internal/arweave"
 	"github.com/LWDJD/read-only-git/internal/publish"
 )
 
@@ -1403,5 +1405,37 @@ func TestPublishLocalEndToEnd(t *testing.T) {
 	}
 	if len(entries) == 0 {
 		t.Fatal("发布记录目录是空的")
+	}
+}
+
+// 页面上的节点候选必须与 arweave.KnownNodes 一致。
+//
+// 两边分开写就会漂移：一边加了新网关，另一边不知道。
+// 这也是一道回归门：改 KnownNodes 而忘了改页面，测试当场报出来。
+func TestPageNodeOptionsMatchKnownNodes(t *testing.T) {
+	m := regexp.MustCompile(`(?s)<datalist id="nodeList">(.*?)</datalist>`).FindStringSubmatch(DefaultPage)
+	if m == nil {
+		t.Fatal("页面里找不到 nodeList 这个 datalist")
+	}
+	var got []string
+	for _, mm := range regexp.MustCompile(`<option value="([^"]+)"`).FindAllStringSubmatch(m[1], -1) {
+		got = append(got, mm[1])
+	}
+
+	want := arweave.KnownNodes
+	if len(got) != len(want) {
+		t.Fatalf("候选数量不一致：页面 %d 个 %v，KnownNodes %d 个 %v", len(got), got, len(want), want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("第 %d 项不一致：页面 %q，KnownNodes %q", i, got[i], want[i])
+		}
+	}
+}
+
+// 节点输入框要能提候选：少了 list 属性，datalist 就是一段死代码。
+func TestPageNodeInputUsesDatalist(t *testing.T) {
+	if !strings.Contains(DefaultPage, `id="pubNode" list="nodeList"`) {
+		t.Error(`pubNode 应当用 list="nodeList" 关联候选`)
 	}
 }

@@ -44,6 +44,8 @@ func run(args []string) error {
 		return cmdSite(args[1:])
 	case "publish":
 		return cmdPublish(args[1:])
+	case "nodes":
+		return cmdNodes(args[1:])
 	case "webui":
 		return cmdWebui(args[1:])
 	case "help", "-h", "--help":
@@ -66,6 +68,7 @@ func usage(w *os.File) {
 	fmt.Fprintln(w, "  pack [--rebuild] <源仓库> [输出目录] [仓库名]  生成可托管的裸仓库")
 	fmt.Fprintln(w, "  publish <站点目录> [目标目录]                 发布到本地目录")
 	fmt.Fprintln(w, "  publish <站点目录> --arweave [选项]            发布到 Arweave（钱包签名）")
+	fmt.Fprintln(w, "  nodes [地址…]                                探测网关，看发布时该填哪个 --node")
 	fmt.Fprintln(w, "  webui [--site <站点目录>] [--port <端口>]      打开图形界面，功能与命令行一致")
 	fmt.Fprintln(w, "  help                                         显示本说明")
 	fmt.Fprintln(w)
@@ -543,6 +546,93 @@ func openBrowser(url string) {
 		cmd = exec.Command("xdg-open", url)
 	}
 	_ = cmd.Start()
+}
+
+// cmdNodes 探测发布时可用的网关，告诉用户此刻该填哪个。
+//
+// 存在的理由：交易是先 POST 给网关、再由网关转发给节点，
+// 这一跳不通时提交会「看似成功、实则没到场」。与其在失败之后翻日志猜，
+// 不如在发布之前花两秒看清出口。
+//
+// 只读 GET /info，不花 AR，失败也不留痕，可以随时跑。
+func cmdNodes(args []string) error {
+	proxyMode := ""
+	proxyURL := ""
+	var pos []string
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--proxy":
+			if i+1 >= len(args) {
+				return fmt.Errorf("--proxy 后面缺少值")
+			}
+			i++
+			proxyMode = args[i]
+		case "--proxy-url":
+			if i+1 >= len(args) {
+				return fmt.Errorf("--proxy-url 后面缺少值")
+			}
+			i++
+			proxyURL = args[i]
+		case "-h", "--help":
+			fmt.Fprintln(os.Stdout, "用法: rog nodes [地址…] [--proxy system|manual|off] [--proxy-url <地址>]")
+			fmt.Fprintln(os.Stdout, "  探测提交交易用的网关，报出各自的高度、队列与耗时。")
+			fmt.Fprintln(os.Stdout, "  不填地址就测内置清单。只读 /info，不花 AR。")
+			return nil
+		default:
+			pos = append(pos, args[i])
+		}
+	}
+
+	// 地址也可以直接列在命令后面；不列就测内置清单。
+	nodes := pos
+	if len(nodes) == 0 {
+		nodes = arweave.KnownNodes
+	}
+
+	mode := arweave.ProxySystem
+	if proxyMode != "" {
+		m, err := arweave.ParseProxyMode(proxyMode)
+		if err != nil {
+			return err
+		}
+		mode = m
+	}
+	if mode == arweave.ProxyManual && proxyURL == "" {
+		return fmt.Errorf("手动代理模式需要 --proxy-url")
+	}
+	client, err := arweave.NewClient(arweave.ProxyConfig{Mode: mode, URL: proxyURL}, 0)
+	if err != nil {
+		return err
+	}
+
+	fmt.Fprintf(os.Stdout, "探测 %d 个网关（只读 /info，不花 AR）…\n\n", len(nodes))
+
+	// 探测本身也要有上限，否则一个黑洞地址会把整条命令堵死。
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	probes := arweave.ProbeNodes(ctx, nodes, client)
+
+	var fastest string
+	for _, p := range probes {
+		if p.Err != nil {
+			fmt.Fprintf(os.Stdout, "  x  %-26s 不通：%v\n", p.URL, p.Err)
+			continue
+		}
+		info := p.Info
+		if fastest == "" {
+			fastest = info.URL
+		}
+		fmt.Fprintf(os.Stdout, "  v  %-26s 高度 %-10d 队列 %-4d %.0fms\n",
+			info.URL, info.Height, info.QueueLength, float64(info.Latency.Microseconds())/1000)
+	}
+
+	fmt.Fprintln(os.Stdout)
+	if fastest == "" {
+		return fmt.Errorf("没有可用网关；检查网络或代理设置")
+	}
+	fmt.Fprintf(os.Stdout, "建议用 %s：发布时填 --node %s\n", fastest, fastest)
+	return nil
 }
 
 func cmdPack(args []string) error {

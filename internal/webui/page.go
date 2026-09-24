@@ -204,7 +204,13 @@ const DefaultPage = `<!doctype html>
       </div>
       <div id="destL1" hidden>
         <label>节点</label>
-        <input id="pubNode" placeholder="https://arweave.net">
+        <input id="pubNode" list="nodeList" placeholder="https://arweave.net">
+        <datalist id="nodeList">
+          <option value="https://arweave.net"></option>
+          <option value="https://ardrive.net"></option>
+          <option value="https://permagate.io"></option>
+        </datalist>
+        <p class="muted" style="margin:0">交易先交给网关、再由它转给节点，这一跳不通就会「看似成功、实则没到场」。上面这几个都是能应答的，也可以用 <code>rog nodes</code> 现场探一下哪个快。</p>
       </div>
       <label>网络出口（发布时访问节点与网关）</label>
       <div class="row">
