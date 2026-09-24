@@ -1,7 +1,8 @@
 import {
-  h, mount, fmtDate, shortSha, fmtBytes,
-  bytesLookBinary, isImage, looksBinary,
+  h, mount, fmtDate, fmtRelative, shortSha, fmtBytes,
+  bytesLookBinary, isImage, looksBinary, avatarNode, skeletonLines,
 } from './ui.js'
+import { icon, iconForPath } from './icons.js'
 import {
   treeHref, blobHref, commitsHref, repoHref, cloneUrl,
   branchesHref, tagsHref,
@@ -10,7 +11,17 @@ import { loadRegistry, openRepo, stripGitSuffix } from './store.js'
 import { renderMarkdown, stripMarkdown } from './markdown.js'
 
 export function renderLoading(app, message) {
-  mount(app, h('p', { class: 'muted', text: message || '加载中…' }))
+  // 骨架替代一行「加载中…」：形状接近真实内容，等待感就轻了。
+  // 真实文字留在下面，屏幕阅读器与慢网络下仍能读到状态。
+  mount(app,
+    h('div', { class: 'panel', 'aria-busy': 'true' },
+      h('div', { class: 'panel-head' }, h('div', { class: 'sk sk-bar', style: 'width:160px' })),
+      h('div', { class: 'file-list sk-list' },
+        skeletonLines(6, i => ['55%', '42%', '62%', '38%', '50%', '45%'][i]),
+      ),
+    ),
+    h('p', { class: 'muted sk-hint', text: message || '加载中…' }),
+  )
 }
 
 export function renderError(app, err) {
@@ -65,7 +76,7 @@ async function registryDescription(name) {
 function repoHeader({ name, description }) {
   return h('header', { class: 'repo-header' },
     h('div', { class: 'repo-title' },
-      h('span', { class: 'repo-mark', text: '⬢' }),
+      icon('repo', 'repo-mark'),
       h('span', { class: 'repo-name', text: repoLabel(name) }),
       h('span', { class: 'pill pill-muted', text: '只读' }),
     ),
@@ -124,18 +135,18 @@ function aboutPanel({ name, ref, description, license, heads, tags, repo }) {
 
     h('ul', { class: 'about-list' },
       h('li', {},
-        h('span', { class: 'about-ico', text: '🔗' }),
+        icon('link', 'about-ico'),
         h('code', { class: 'about-clone', text: clone.replace(/^https?:\/\//, '') }),
         copyBtn,
       ),
       license
         ? h('li', {},
-          h('span', { class: 'about-ico', text: '📄' }),
+          icon('license', 'about-ico'),
           h('a', { href: blobHref(name, ref, license.path), text: license.label }),
         )
         : null,
       h('li', {},
-        h('span', { class: 'about-ico', text: '⭐' }),
+        icon('star', 'about-ico'),
         h('span', { text: `${repo.objectCount} 个对象 · ${heads.length} 个分支 · ${tags.length} 个标签` }),
       ),
     ),
@@ -154,7 +165,7 @@ function releasesPanel({ name, tags }) {
   return sidePanel('Releases',
     h('ul', { class: 'release-list' },
       limited.map((tag, i) => h('li', {},
-        h('span', { class: 'tag-ico', text: '🏷' }),
+        icon('tag', 'tag-ico'),
         h('a', { href: treeHref(name, tag.sha, ''), text: tag.name }),
         i === 0 ? h('span', { class: 'pill', text: 'Latest' }) : null,
       )),
@@ -229,7 +240,7 @@ export async function viewHome(app, ctx) {
     h('ul', { class: 'repo-list' },
       repositories.map(entry => h('li', {},
         h('a', { href: repoHref(entry.name) },
-          h('div', { class: 'name', text: entry.name }),
+          h('div', { class: 'name' }, icon('repo', 'repo-list-ico'), h('span', { text: entry.name })),
           entry.description ? h('div', { class: 'desc', text: entry.description }) : null,
         ),
       )),
@@ -320,7 +331,7 @@ export async function viewBlob(app, ctx, route) {
           h('img', { src: URL.createObjectURL(blob), alt: path }))
       } else if (looksBinary(path) || bytesLookBinary(bytes)) {
         body = h('div', { class: 'notice binary-note' },
-          '二进制文件，不做渲染。大小 ', fmtBytes(bytes.length), '。')
+          icon('binary'), ' 二进制文件，不做渲染。大小 ', fmtBytes(bytes.length), '。')
       } else {
         body = h('pre', { class: 'blob' }, numberLines(decodeText(bytes)))
       }
@@ -350,18 +361,26 @@ export async function viewCommits(app, ctx, route) {
       const items = []
 
       for await (const item of chrome.repo.walkCommits(sha, 60)) {
+        const author = item.commit.author
         items.push(h('li', {},
+          avatarNode(author && author.name, author && author.email),
           h('div', { class: 'commit-body' },
-            h('div', { class: 'commit-subject', text: firstLine(item.commit) }),
+            h('a', {
+              class: 'commit-subject',
+              href: treeHref(name, item.sha, ''),
+              text: firstLine(item.commit),
+            }),
             h('div', { class: 'commit-meta' },
-              h('span', { text: (item.commit.author && item.commit.author.name) || 'unknown' }),
+              h('span', { text: (author && author.name) || 'unknown' }),
               ' · ',
-              fmtDate(item.commit.author && item.commit.author.date),
+              h('span', {
+                text: fmtRelative(author && author.date),
+                title: fmtDate(author && author.date),
+              }),
             ),
           ),
           h('div', { class: 'commit-side' },
             h('code', { class: 'commit-sha', text: shortSha(item.sha) }),
-            link(treeHref(name, item.sha, ''), '浏览'),
           ),
         ))
       }
@@ -406,6 +425,7 @@ export async function viewBranches(app, ctx, route) {
         }
 
         rows.push(h('li', {},
+          icon('branch', 'ref-ico'),
           h('div', { class: 'ref-main' },
             h('div', { class: 'ref-name' },
               link(treeHref(name, head.sha, ''), head.name),
@@ -466,6 +486,7 @@ export async function viewTags(app, ctx, route) {
         }
 
         rows.push(h('li', {},
+          icon('tag', 'ref-ico'),
           h('div', { class: 'ref-main' },
             h('div', { class: 'ref-name' },
               link(treeHref(name, tag.sha, ''), tag.name),
@@ -524,7 +545,7 @@ function fileList(name, ref, basePath, entries) {
       const target = joinPath(entry.name)
       return h('li', {},
         h('a', { href: isDir ? treeHref(name, ref, target) : blobHref(name, ref, target) },
-          h('span', { class: `file-icon${isDir ? ' is-dir' : ''}`, text: isDir ? '▸' : '·' }),
+          icon(iconForPath(entry.name, entry.kind)),
           h('span', { class: isDir ? 'file-name is-dir' : 'file-name', text: entry.name }),
           h('span', { class: 'file-sha', text: shortSha(entry.sha) }),
         ),
@@ -571,6 +592,7 @@ function findDocs(entries, basePath) {
     .map(hit => ({
       path: prefix + hit.entry.name,
       label: hit.entry.name,
+      kind: hit.kind,
       markdown: /\.(md|markdown)$/i.test(hit.entry.name),
     }))
 }
@@ -601,12 +623,12 @@ function docsPanel(repo, sha, docs) {
   }
 
   docs.forEach((doc, i) => {
+    const ico = doc.kind === 'license' ? 'license' : (doc.markdown ? 'markdown' : 'doc')
     tabs.append(h('button', {
       type: 'button',
       class: 'docs-tab',
-      text: doc.label,
       onclick: () => select(i),
-    }))
+    }, icon(ico), h('span', { text: doc.label })))
   })
 
   select(0)
@@ -769,7 +791,6 @@ function downloadButton(path, bytes) {
     class: 'btn',
     href: '#',
     download: fileName,
-    text: '下载',
     onclick: (e) => {
       e.preventDefault()
       const url = URL.createObjectURL(new Blob([bytes], { type: 'application/octet-stream' }))
@@ -779,7 +800,7 @@ function downloadButton(path, bytes) {
       a.click()
       setTimeout(() => URL.revokeObjectURL(url), 2000)
     },
-  })
+  }, icon('download'), h('span', { text: '下载' }))
 }
 
 function guessMime(path) {

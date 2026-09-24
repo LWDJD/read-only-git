@@ -34,13 +34,29 @@
 
   --page-width:        1280px;
   --side-width:        296px;
+
+  /* 间距走 4px 网格，字号走阶梯。组件里不再随手写数字 */
+  --sp-1:  4px;
+  --sp-2:  8px;
+  --sp-3:  12px;
+  --sp-4:  16px;
+  --sp-5:  24px;
+  --sp-6:  32px;
+
+  --fs-xs:   12px;
+  --fs-sm:   13px;
+  --fs-base: 14px;
+  --fs-md:   15px;
+  --fs-lg:   17px;
+  --fs-xl:   20px;
+  --fs-2xl:  26px;
 }
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     --bg:            #0d1117;
     --bg-subtle:     #151b23;
-    --bg-inset:      #151b23;
+    --bg-inset:      #1c232c;
     --text:          #f0f6fc;
     --text-muted:    #9198a1;
     --border:        #3d444d;
@@ -59,7 +75,7 @@
 :root[data-theme="dark"] {
   --bg:            #0d1117;
   --bg-subtle:     #151b23;
-  --bg-inset:      #151b23;
+  --bg-inset:      #1c232c;
   --text:          #f0f6fc;
   --text-muted:    #9198a1;
   --border:        #3d444d;
@@ -99,6 +115,70 @@ code, pre, .mono { font-family: var(--mono); font-size: 0.92em; }
 h1 { font-size: 20px; font-weight: 600; margin: 0 0 8px; }
 h2 { font-size: 16px; font-weight: 600; margin: 0 0 8px; }
 h3 { font-size: 14px; font-weight: 600; margin: 0 0 8px; }
+
+/* --- 图标 ---------------------------------------------------------------- */
+
+/* 手绘 SVG 的描边规格统一在这里给，形状本身只管路径（见 icons.js）。
+   currentColor 跟随主题，深浅色都不用单独处理。 */
+.icon {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  vertical-align: -3px;
+  opacity: .85;
+}
+
+/* --- 头像 ---------------------------------------------------------------- */
+
+/* 提交者的首字母色块，颜色由 JS 按 email 散列后内联过来。
+   白字配中等亮度的底，任何色相上对比都够。 */
+.avatar {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  user-select: none;
+}
+
+/* --- 加载骨架 ------------------------------------------------------------ */
+
+/* 只做透明度起伏，不闪光不位移：它是状态反馈，不是装饰。 */
+.sk {
+  background: var(--pill-bg);
+  border-radius: var(--radius-sm);
+  animation: sk-breathe 1.4s ease-in-out infinite;
+}
+.sk-line { height: 12px; margin: 11px var(--sp-4); }
+.sk-bar  { height: 14px; }
+.sk-hint { margin: var(--sp-3) 2px; font-size: var(--fs-sm); }
+
+@keyframes sk-breathe {
+  0%, 100% { opacity: .5; }
+  50%      { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sk { animation: none; }
+}
+
+/* --- 可达性 -------------------------------------------------------------- */
+
+a:focus-visible, button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
 
 /* --- 外层框架 ------------------------------------------------------------ */
 
@@ -157,7 +237,7 @@ h3 { font-size: 14px; font-weight: 600; margin: 0 0 8px; }
   flex-wrap: wrap;
 }
 
-.repo-mark { font-size: 18px; color: var(--text-muted); }
+.repo-mark { width: 20px; height: 20px; color: var(--text-muted); }
 
 .repo-name { font-size: 20px; font-weight: 600; }
 
@@ -439,23 +519,24 @@ h3 { font-size: 14px; font-weight: 600; margin: 0 0 8px; }
 
 .file-list { list-style: none; margin: 0; padding: 0; }
 
-.file-list li { border-bottom: 1px solid var(--border); }
+.file-list li { border-bottom: 1px solid var(--border-soft); }
 .file-list li:last-child { border-bottom: none; }
 
 .file-list a {
   display: grid;
-  grid-template-columns: 18px minmax(0, 1fr) auto;
+  grid-template-columns: 20px minmax(0, 1fr) auto;
   align-items: center;
-  gap: 10px;
-  padding: 8px 16px;
+  gap: var(--sp-3);
+  padding: 0 var(--sp-4);
+  height: 38px;
   color: var(--text);
-  font-size: 13px;
+  font-size: var(--fs-sm);
 }
 
 .file-list a:hover { background: var(--hover); text-decoration: none; }
 
-.file-icon { text-align: center; color: var(--text-muted); }
-.file-icon.is-dir { color: var(--accent); }
+.file-list .icon { color: var(--text-muted); transition: color .1s; }
+.file-list a:hover .icon { color: var(--accent); }
 
 .file-name {
   font-family: var(--mono);
@@ -464,12 +545,17 @@ h3 { font-size: 14px; font-weight: 600; margin: 0 0 8px; }
   white-space: nowrap;
 }
 
-.file-name.is-dir { color: var(--accent); }
+.file-name.is-dir { color: var(--accent); font-weight: 500; }
 
 .file-sha {
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: var(--fs-xs);
   color: var(--text-muted);
+  opacity: .7;
+}
+
+@media (max-width: 720px) {
+  .file-sha { display: none; }
 }
 
 /* --- blob ---------------------------------------------------------------- */
@@ -495,20 +581,26 @@ h3 { font-size: 14px; font-weight: 600; margin: 0 0 8px; }
 
 pre.blob {
   margin: 0;
-  padding: 16px;
+  padding: var(--sp-4) 0;
   overflow-x: auto;
   background: var(--bg);
-  line-height: 1.45;
+  line-height: 1.55;
   tab-size: 4;
+  font-family: var(--mono);
+  font-size: var(--fs-sm);
 }
 
+/* 行号栏与正文之间一条分隔线，选中代码时行号不跟着进去 */
 pre.blob .line-no {
   display: inline-block;
   width: 3.5em;
-  margin-right: 14px;
+  padding-right: var(--sp-3);
+  margin-right: var(--sp-4);
   text-align: right;
   color: var(--text-muted);
   user-select: none;
+  border-right: 1px solid var(--border-soft);
+  opacity: .75;
 }
 
 .notice {
@@ -538,14 +630,23 @@ pre.blob .line-no {
 .commit-list li {
   display: flex;
   align-items: center;
-  gap: 16px;
-  padding: 10px 16px;
-  border-bottom: 1px solid var(--border);
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-4);
+  border-bottom: 1px solid var(--border-soft);
 }
 
 .commit-list li:last-child { border-bottom: none; }
 
 .commit-body { flex: 1; min-width: 0; }
+
+/* 标题本身就是入口（点它进浏览），所以颜色留在正文色系，
+   免得整列表都是链接蓝；hover 才亮出来 */
+a.commit-subject {
+  color: var(--text);
+  text-decoration: none;
+}
+
+a.commit-subject:hover { color: var(--accent); text-decoration: underline; }
 
 .commit-subject {
   font-weight: 500;
@@ -577,12 +678,14 @@ pre.blob .line-no {
 .ref-list li {
   display: flex;
   align-items: center;
-  gap: 16px;
-  padding: 10px 16px;
-  border-bottom: 1px solid var(--border);
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-4);
+  border-bottom: 1px solid var(--border-soft);
 }
 
 .ref-list li:last-child { border-bottom: none; }
+
+.ref-ico { width: 15px; height: 15px; color: var(--text-muted); }
 
 .ref-main { flex: 1; min-width: 0; }
 
@@ -641,7 +744,7 @@ pre.blob .line-no {
 
 .about-list li a { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-.about-ico { flex: none; opacity: 0.8; }
+.about-ico { width: 14px; height: 14px; color: var(--text-muted); }
 
 .about-clone {
   flex: 1;
@@ -677,7 +780,7 @@ pre.blob .line-no {
   min-width: 0;
 }
 
-.tag-ico { flex: none; opacity: 0.8; }
+.tag-ico { width: 14px; height: 14px; color: var(--text-muted); }
 
 .release-list a {
   font-family: var(--mono);
@@ -700,8 +803,11 @@ pre.blob .line-no {
 }
 
 .docs-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   font: inherit;
-  font-size: 13px;
+  font-size: var(--fs-sm);
   padding: 8px 10px;
   background: none;
   border: none;
@@ -710,6 +816,8 @@ pre.blob .line-no {
   cursor: pointer;
   white-space: nowrap;
 }
+
+.docs-tab .icon { width: 14px; height: 14px; }
 
 .docs-tab:hover { color: var(--text); }
 
@@ -748,18 +856,38 @@ pre.doc-text {
 
 .readme h1, .readme h2 {
   border-bottom: 1px solid var(--border);
-  padding-bottom: 6px;
-  margin: 24px 0 16px;
+  padding-bottom: var(--sp-2);
+  margin: var(--sp-6) 0 var(--sp-4);
 }
 
-.readme h1 { font-size: 26px; }
-.readme h2 { font-size: 20px; }
-.readme h3 { font-size: 17px; margin: 24px 0 16px; }
-.readme p { margin: 0 0 16px; }
-.readme ul, .readme ol { margin: 0 0 16px; padding-left: 28px; }
-.readme li { margin: 4px 0; }
+.readme h1 { font-size: var(--fs-2xl); }
+.readme h2 { font-size: var(--fs-xl); }
+.readme h3 { font-size: var(--fs-lg); margin: var(--sp-5) 0 var(--sp-3); }
+.readme p { margin: 0 0 var(--sp-4); }
+.readme ul, .readme ol { margin: 0 0 var(--sp-4); padding-left: 26px; }
+.readme li { margin: var(--sp-1) 0; }
 
-.readme img { max-width: 100%; }
+.readme img { max-width: 100%; border-radius: var(--radius-sm); }
+
+/* 表格斑马：长表格逐行对齐视线 */
+.readme tr:nth-child(2n) { background: var(--bg-subtle); }
+
+/* 折叠块：README 里的「展开看细节」，给它一个轻盒而不是裸文本 */
+.readme details {
+  margin: 0 0 var(--sp-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0 var(--sp-4);
+  background: var(--bg-subtle);
+}
+
+.readme summary {
+  cursor: pointer;
+  padding: var(--sp-3) 0;
+  font-weight: 500;
+}
+
+.readme details > *:last-child { margin-bottom: var(--sp-4); }
 
 .readme a { text-decoration: none; }
 .readme a:hover { text-decoration: underline; }
@@ -825,11 +953,16 @@ pre.doc-text {
 .repo-list a:hover { text-decoration: none; background: var(--hover); }
 
 .repo-list .name {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
   font-weight: 600;
   font-family: var(--mono);
   color: var(--accent);
   font-size: 15px;
 }
+
+.repo-list-ico { color: var(--text-muted); }
 
 .repo-list .desc {
   color: var(--text-muted);
@@ -840,8 +973,11 @@ pre.doc-text {
 /* --- 杂项 ---------------------------------------------------------------- */
 
 .btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   font: inherit;
-  font-size: 12px;
+  font-size: var(--fs-xs);
   padding: 3px 10px;
   border-radius: var(--radius-sm);
   border: 1px solid var(--border);
@@ -852,8 +988,17 @@ pre.doc-text {
   text-decoration: none;
 }
 
+.btn .icon { width: 14px; height: 14px; }
+
 .btn:hover { background: var(--hover); text-decoration: none; }
 
 .crumbs + .panel, .crumbs ~ .panel { margin-top: 0; }
 
 .layout-main > .crumbs { margin-bottom: 16px; }
+
+/* 窄屏收一收：页面留白与侧边信息让位给正文 */
+@media (max-width: 560px) {
+  .page { padding: var(--sp-4) 10px 48px; }
+  .commit-side { gap: var(--sp-2); }
+  .ref-side { display: none; }
+}

@@ -53,6 +53,60 @@ export function shortSha(sha) {
   return String(sha || '').slice(0, 8)
 }
 
+/**
+ * 相对时间：刚刚 / N 分钟前 / N 天前……
+ *
+ * 列表里绝对时间没有距离感，但精确时间仍有用，
+ * 调用方通常把 fmtDate 挂在 title 上，两个都要。
+ */
+export function fmtRelative(date) {
+  if (!(date instanceof Date) || Number.isNaN(date.getTime())) return ''
+  const min = Math.floor((Date.now() - date.getTime()) / 60000)
+  if (min < 1) return '刚刚'
+  if (min < 60) return `${min} 分钟前`
+  const hr = Math.floor(min / 60)
+  if (hr < 24) return `${hr} 小时前`
+  const day = Math.floor(hr / 24)
+  if (day < 30) return `${day} 天前`
+  const mon = Math.floor(day / 30)
+  if (mon < 12) return `${mon} 个月前`
+  return `${Math.floor(mon / 12)} 年前`
+}
+
+/**
+ * 提交者头像：名字首字母的色块，颜色由 email 稳定散列。
+ *
+ * 只是视觉锚点，不是身份验证。饱和度与亮度取固定值，
+ * 白字在任何色相上都够对比，深浅色主题都不用单独处理。
+ */
+export function avatarNode(name, email) {
+  const key = String(email || name || '?').trim().toLowerCase()
+  let hval = 0
+  for (let i = 0; i < key.length; i++) hval = (hval * 31 + key.charCodeAt(i)) >>> 0
+  const label = String(name || '?').trim().slice(0, 1).toUpperCase() || '?'
+  return h('span', {
+    class: 'avatar',
+    style: `background:hsl(${hval % 360},52%,40%)`,
+    text: label,
+  })
+}
+
+/**
+ * 加载骨架：几条会呼吸的灰条，替代「加载中…」一行字。
+ *
+ * 动画只是透明度起伏，不闪光不位移：它是状态反馈，不是装饰。
+ */
+export function skeletonLines(n, width) {
+  const out = []
+  for (let i = 0; i < n; i++) {
+    out.push(h('div', {
+      class: 'sk sk-line',
+      style: width ? `width:${typeof width === 'function' ? width(i) : width}` : '',
+    }))
+  }
+  return out
+}
+
 const IMAGE_EXT = /\.(png|jpe?g|gif|webp|avif|bmp|ico|svg)$/i
 const BINARY_EXT = /\.(png|jpe?g|gif|webp|avif|bmp|ico|pdf|zip|gz|tgz|bz2|xz|7z|rar|wasm|so|dll|exe|bin|o|a|class|jar|mp3|mp4|mov|avi|woff2?|ttf|otf)$/i
 
