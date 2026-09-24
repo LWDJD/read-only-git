@@ -639,6 +639,15 @@ pre.blob .line-no {
 
 .commit-body { flex: 1; min-width: 0; }
 
+/* 标题本身就是入口（点它进浏览），所以颜色留在正文色系，
+   免得整列表都是链接蓝；hover 才亮出来 */
+a.commit-subject {
+  color: var(--text);
+  text-decoration: none;
+}
+
+a.commit-subject:hover { color: var(--accent); text-decoration: underline; }
+
 .commit-subject {
   font-weight: 500;
   overflow: hidden;

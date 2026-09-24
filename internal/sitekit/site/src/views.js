@@ -365,7 +365,11 @@ export async function viewCommits(app, ctx, route) {
         items.push(h('li', {},
           avatarNode(author && author.name, author && author.email),
           h('div', { class: 'commit-body' },
-            h('div', { class: 'commit-subject', text: firstLine(item.commit) }),
+            h('a', {
+              class: 'commit-subject',
+              href: treeHref(name, item.sha, ''),
+              text: firstLine(item.commit),
+            }),
             h('div', { class: 'commit-meta' },
               h('span', { text: (author && author.name) || 'unknown' }),
               ' · ',
@@ -377,7 +381,6 @@ export async function viewCommits(app, ctx, route) {
           ),
           h('div', { class: 'commit-side' },
             h('code', { class: 'commit-sha', text: shortSha(item.sha) }),
-            link(treeHref(name, item.sha, ''), '浏览'),
           ),
         ))
       }
