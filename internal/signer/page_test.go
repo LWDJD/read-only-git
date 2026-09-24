@@ -31,3 +31,18 @@ func TestSignerPageSignsAndUploads(t *testing.T) {
 		}
 	}
 }
+
+// 多块时签名页也不提交，只回传 proofs，由 Go 提交。
+//
+// 理由同 webui：arweave-js 的 upload() 不暴露响应体，
+// 它说成功时你没法知道节点实际回了什么。
+func TestSignerPageHandsMultiChunkToGo(t *testing.T) {
+	for _, good := range []string{"uploaded: false", "proofs: proofs", "data_path"} {
+		if !strings.Contains(DefaultPage, good) {
+			t.Errorf("签名页里应当有 %q", good)
+		}
+	}
+	if strings.Contains(DefaultPage, "transactions.upload") {
+		t.Error("签名页不该再用 transactions.upload：它不暴露响应体")
+	}
+}

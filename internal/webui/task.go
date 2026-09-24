@@ -237,6 +237,13 @@ func (s *Store) SetLogDir(dir string) {
 	s.logDir = dir
 }
 
+// LogDir 返回日志落脚点。抽出来是为了让用例与界面都能问出它。
+func (s *Store) LogDir() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.logDir
+}
+
 // Run 建一个任务并异步执行它，返回任务 id。
 func (s *Store) Run(kind string, fn func(*Task)) string {
 	s.mu.Lock()

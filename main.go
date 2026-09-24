@@ -520,6 +520,10 @@ func cmdWebui(args []string) error {
 	fmt.Printf("  %s\n", srv.URL())
 	fmt.Println()
 	fmt.Printf("站点   %s\n", siteDir)
+	// 日志落在哪里要打出来：它的价值在于出事时找得到。
+	if dir, err := webui.DefaultLogDir(); err == nil {
+		fmt.Printf("日志   %s\n", dir)
+	}
 	fmt.Println("按 Ctrl+C 退出。")
 	fmt.Println()
 

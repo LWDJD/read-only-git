@@ -32,6 +32,9 @@ func newTestServer(t *testing.T, site string) *Server {
 	t.Helper()
 	// 端口传 0：测试之间互不干扰，由系统挑空闲的
 	srv := New(site, 0)
+	// 日志改写到临时目录。默认落点是用户主目录，测试不该往那儿写东西；
+	// 同时也让用例能确定地找到日志文件。
+	srv.tasks.SetLogDir(t.TempDir())
 	if err := srv.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -1455,5 +1458,46 @@ func TestPageDoesNotOverrideReward(t *testing.T) {
 	}
 	if !strings.Contains(DefaultPage, "createTransaction") {
 		t.Error("页面应当用 arweave-js 的 createTransaction 构造交易")
+	}
+}
+
+// 多块时页面不提交，只把 proofs 回传，由 Go 提交。
+//
+// 这是一道回归门：arweave-js 的 upload() 不暴露响应体，
+// 它说成功时你没法知道节点实际回了什么。实测栽过的正是这种情形，
+// 一旦有人把多块又交回 upload，失败时就再也看不见线索。
+func TestPageHandsMultiChunkToGo(t *testing.T) {
+	for _, good := range []string{"uploaded: false", "proofs: proofs", "data_path"} {
+		if !strings.Contains(DefaultPage, good) {
+			t.Errorf("页面里应当有 %q", good)
+		}
+	}
+	if strings.Contains(DefaultPage, "transactions.upload") {
+		t.Error("页面不该再用 transactions.upload：它不暴露响应体，出了问题看不见")
+	}
+}
+
+// 从链上恢复有自己的面板：它是往本地拿内容，与发布（往外写）不是一件事。
+//
+// 也不该再留在发布面板里——之前那个 pubFrom 输入框其实就是它，
+// 混在发布里会让人以为两件事要一起做。
+func TestPageHasIndependentRestorePanel(t *testing.T) {
+	for _, want := range []string{"restorePanel", "restoreEntry", "restoreDest", "doRestore"} {
+		if !strings.Contains(DefaultPage, want) {
+			t.Errorf("页面里应当有 %q", want)
+		}
+	}
+	if strings.Contains(DefaultPage, "pubFrom") {
+		t.Error("发布面板里不该再有从链上恢复的入口：它已经独立成块")
+	}
+}
+
+// 恢复的目标目录要写明「必须为空」，并讲清不会替用户清空。
+func TestPageRestoreExplainsEmptyDir(t *testing.T) {
+	if !strings.Contains(DefaultPage, "必须是空目录") {
+		t.Error("恢复面板应当写明目标目录必须为空")
+	}
+	if !strings.Contains(DefaultPage, "也不会替你清空") {
+		t.Error("应当讲清非空目录不会被覆盖或清空")
 	}
 }
