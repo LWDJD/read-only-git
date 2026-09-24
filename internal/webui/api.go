@@ -118,8 +118,15 @@ type scaffoldState struct {
 }
 
 type stateResponse struct {
-	Site      string        `json:"site"`
-	Exists    bool          `json:"exists"`
+	Site   string `json:"site"`
+	Exists bool   `json:"exists"`
+	// Cwd 是 webui 进程的工作目录。
+	//
+	// 界面上那些填路径的地方（打包源、站点点、恢复目标）都允许写相对路径，
+	// 而相对路径的基准就是这个目录。不把它显示出来，用户就无从判断
+	// 自己写的 `public` 究章指的是哪里——实测就撞过这个坑：填了 public，
+	// 报「目录不是空的」，但错误里没说那是哪个 public。
+	Cwd       string        `json:"cwd"`
 	Files     []fileState   `json:"files"`
 	TotalSize int64         `json:"totalSize"`
 	Repos     []repoState   `json:"repos"`
@@ -139,6 +146,9 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 // 一旦缓存，界面就会显示与磁盘不符的内容。
 func (s *Server) buildState(site string) stateResponse {
 	out := stateResponse{Site: site}
+	if wd, err := os.Getwd(); err == nil {
+		out.Cwd = wd
+	}
 
 	// 站点目录不存在不算错误：新建站点时它就是空的。
 	// 把骨架缺多少一并算出来，界面才知道该不该提示布一下。

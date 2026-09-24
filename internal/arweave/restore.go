@@ -139,7 +139,8 @@ func checkDirEmpty(abs string) error {
 		return fmt.Errorf("看不了目标目录 %s: %w", abs, err)
 	}
 	if len(entries) > 0 {
-		return fmt.Errorf("目标目录不是空的（%d 项）；请自己清空，或换一个空目录", len(entries))
+		return fmt.Errorf("目标目录 %s 不是空的（%d 项）；请自己清空，或换一个空目录",
+			abs, len(entries))
 	}
 	return nil
 }

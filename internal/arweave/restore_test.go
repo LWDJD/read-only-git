@@ -161,6 +161,23 @@ func TestRestoreIntoRefusesNonEmptyDir(t *testing.T) {
 	}
 }
 
+// 错误信息必须说清是哪个目录：用户填的可能是相对路径，
+// 不把解析结果写出来，他就无从判断自己指的是哪儿。
+func TestRefuseNonEmptyDirNamesTheDir(t *testing.T) {
+	dest := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dest, "x.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	plan := &RestorePlan{Entry: "e", Paths: map[string]string{"a.txt": "id-a"}}
+	_, err := RestoreInto(context.Background(), "https://example.invalid", plan, dest, nil, nil)
+	if err == nil {
+		t.Fatal("非空目录应当报错")
+	}
+	if !strings.Contains(err.Error(), dest) {
+		t.Errorf("错误信息里应当出现解析后的路径 %q，实际: %v", dest, err)
+	}
+}
+
 // 已存在但为空的目录应当放行——这要求是用户自己选的，不是我们替他造的。
 func TestRestoreIntoAcceptsEmptyDir(t *testing.T) {
 	m := &Manifest{Manifest: "arweave/paths", Version: "0.2.0",

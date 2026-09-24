@@ -232,7 +232,7 @@ const DefaultPage = `<!doctype html>
       <input id="restoreEntry" placeholder="re22tX-…">
       <label>恢复到目录（必须是空目录）</label>
       <input id="restoreDest" placeholder="D:\path\to\empty-dir">
-      <p class="muted" style="margin:0 0 8px">目录里已经有东西时会直接报错，不会覆盖、也不会替你清空。</p>
+      <p class="muted" style="margin:0 0 8px" id="restoreHint">目录里已经有东西时会直接报错，不会覆盖、也不会替你清空。</p>
       <label>网关</label>
       <input id="restoreGateway" placeholder="https://arweave.net">
       <button class="primary" id="doRestore">开始恢复</button>
@@ -640,6 +640,15 @@ const DefaultPage = `<!doctype html>
     renderFiles();
 
     el('fileSummary').textContent = allFiles.length + ' 个文件 · ' + fmtSize(st.totalSize || 0);
+
+    // 把相对路径的基准显出来。界面上好几处能填相对路径（打包源、站点根、
+    // 恢复目标），而基准是 webui 的启动目录——不显示出来，用户就不知道
+    // 自己写的 'public' 指的是哪里。
+    if (el('restoreHint') && st.cwd) {
+      el('restoreHint').textContent =
+        '目录里已经有东西时会直接报错，不会覆盖、也不会替你清空。' +
+        '相对路径的基准是 webui 的启动目录：' + st.cwd;
+    }
 
     var rb = el('records');
     rb.textContent = '';
