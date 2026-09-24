@@ -26,11 +26,22 @@ const (
 // 而 manifest 里存的正是这些 id，算错会让整站的路径映射集体失效，
 // 所以这个函数要有测试钉住。
 func DataItemID(signed []byte) (string, error) {
+	raw, err := dataItemIDRaw(signed)
+	if err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(raw[:]), nil
+}
+
+// dataItemIDRaw 与 DataItemID 同源，返回 32 字节原值。
+//
+// 分出一个不算 base64 的版本，是因为 bundle 头部里存的 id 就是这 32 字节，
+// 走一趟字符串编解码再解回来只会多一个出错面。
+func dataItemIDRaw(signed []byte) ([32]byte, error) {
 	start := dataItemSignatureTypeSize
 	end := start + dataItemSignatureSize
 	if len(signed) < end {
-		return "", fmt.Errorf("data item 只有 %d 字节，放不下签名段", len(signed))
+		return [32]byte{}, fmt.Errorf("data item 只有 %d 字节，放不下签名段", len(signed))
 	}
-	sum := sha256.Sum256(signed[start:end])
-	return base64.RawURLEncoding.EncodeToString(sum[:]), nil
+	return sha256.Sum256(signed[start:end]), nil
 }

@@ -238,7 +238,10 @@ func (t *Target) Publish(ctx context.Context, site *publish.Site, prev *publish.
 //
 // 抽成独立方法是为了能被单独测：直接走 Publish 会连带签一大堆 data item。
 func (t *Target) submitL1(ctx context.Context, pending [][]byte, root string, reused int) error {
-	bundle := Bundle(pending)
+	bundle, err := Bundle(pending)
+	if err != nil {
+		return err
+	}
 	tags := BundleTags(t.Repo)
 
 	// 先看有没有上次签好但没提交成功的交易。包体没变，说明这份签名仍然对得上。

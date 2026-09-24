@@ -163,7 +163,9 @@ func TestL1ReusesPendingSignatureOnRetry(t *testing.T) {
 	defer node.Close()
 
 	signer := &countingTxSigner{}
-	items := [][]byte{[]byte("one"), []byte("two")}
+	// 假的 data item 也要够长：Bundle 要按签名段算 id，
+	// 短于 514 字节的根本拼不出合法 bundle。
+	items := [][]byte{makeDataItem(0x11, 520), makeDataItem(0x22, 600)}
 
 	mkTarget := func() *Target {
 		return &Target{
@@ -223,7 +225,7 @@ func TestL1DoesNotReuseStaleSignature(t *testing.T) {
 		PendingPath: pendingPath,
 	}
 
-	if err := target.submitL1(context.Background(), [][]byte{[]byte("new")}, "entry-id", 0); err != nil {
+	if err := target.submitL1(context.Background(), [][]byte{makeDataItem(0x33, 520)}, "entry-id", 0); err != nil {
 		t.Fatalf("提交应当成功: %v", err)
 	}
 	if n := signer.calls.Load(); n != 1 {
