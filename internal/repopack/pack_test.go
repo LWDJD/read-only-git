@@ -408,27 +408,20 @@ func TestPackEmptyRepoProducesArtifact(t *testing.T) {
 	}
 }
 
-// 同一个仓库的并发写入要被锁挡住；不同仓库名互不影响。
+// 同一个站点根下的 pack 要互斥：repository.json 的读改写交错会丢登记。
 func TestAcquireLockExcludesSecond(t *testing.T) {
 	out := t.TempDir()
 
-	release, err := acquireLock(out, "demo")
+	release, err := acquireLock(out)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := acquireLock(out, "demo"); err == nil {
-		t.Fatal("第二次获取同一把锁应当失败")
+	if _, err := acquireLock(out); err == nil {
+		t.Fatal("第二次获取同一站点的锁应当失败")
 	}
-
-	// 不同仓库名不该互相阻塞
-	otherRelease, err := acquireLock(out, "other")
-	if err != nil {
-		t.Fatalf("不同名字不该互相阻塞: %v", err)
-	}
-	otherRelease()
 
 	release()
-	reacquired, err := acquireLock(out, "demo")
+	reacquired, err := acquireLock(out)
 	if err != nil {
 		t.Fatalf("释放后应能重新获取: %v", err)
 	}
@@ -438,17 +431,77 @@ func TestAcquireLockExcludesSecond(t *testing.T) {
 // 锁文件必须放在 .rog 下，否则会被当作站点内容发布出去。
 func TestAcquireLockKeepsOutOfSite(t *testing.T) {
 	out := t.TempDir()
-	release, err := acquireLock(out, "demo")
+	release, err := acquireLock(out)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer release()
 
-	if _, err := os.Stat(filepath.Join(out, "demo.lock")); err == nil {
+	if _, err := os.Stat(filepath.Join(out, "pack.lock")); err == nil {
 		t.Fatal("锁文件不该出现在站点根目录")
 	}
-	if _, err := os.Stat(filepath.Join(out, stateDir, "demo.lock")); err != nil {
+	if _, err := os.Stat(filepath.Join(out, stateDir, "pack.lock")); err != nil {
 		t.Fatalf("锁文件应在 %s 下: %v", stateDir, err)
+	}
+}
+
+// 清单损坏时报错中止，不能当空清单重写——那会把其余仓库的登记全抹掉。
+func TestRegistryCorruptAbortsInsteadOfWiping(t *testing.T) {
+	out := t.TempDir()
+	if err := updateRegistry(out, "one"); err != nil {
+		t.Fatal(err)
+	}
+	broken := []byte(`{"repositories": {}}`)
+	if err := os.WriteFile(filepath.Join(out, "repository.json"), broken, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := updateRegistry(out, "two"); err == nil {
+		t.Fatal("清单损坏时应当报错中止")
+	}
+
+	got, err := os.ReadFile(filepath.Join(out, "repository.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(broken) {
+		t.Fatalf("报错时不该改写清单文件，实际变成: %s", got)
+	}
+}
+
+// 源住在目标里（或反过来）时要拒绝：全量分支先删目标会把源一并删光。
+func TestCheckSourceTargetRelation(t *testing.T) {
+	root := t.TempDir()
+	src := filepath.Join(root, "out", "demo")
+	out := filepath.Join(root, "out")
+
+	if err := checkSourceTargetRelation(src, out); err == nil {
+		t.Fatal("源在目标里应当拒绝")
+	}
+	if err := checkSourceTargetRelation(out, src); err == nil {
+		t.Fatal("目标在源里应当拒绝")
+	}
+	if err := checkSourceTargetRelation(src, src); err == nil {
+		t.Fatal("同一个目录应当拒绝")
+	}
+	if err := checkSourceTargetRelation(src, filepath.Join(root, "elsewhere")); err != nil {
+		t.Fatalf("无关目录不该拒绝: %v", err)
+	}
+}
+
+// 符号链接目标不能当增量目标：增量会原地改写链接指的仓库。
+func TestIsUsableTargetRejectsSymlink(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "real")
+	if err := os.MkdirAll(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("本机建不了符号链接: %v", err)
+	}
+	if isUsableTarget(link) {
+		t.Fatal("符号链接不该被当成可用的增量目标")
 	}
 }
 

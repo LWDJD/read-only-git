@@ -293,6 +293,14 @@ func cmdPublishLocal(siteDir, destDir string) error {
 		return fmt.Errorf("%s 里没有可发布的文件", siteDir)
 	}
 
+	// 同一目标目录同时只允许一条发布：O_TRUNC 原地写时，
+	// 并发的两条发布会互相写半截文件。
+	release, err := publish.Acquire(site.Root, "local:"+destDir)
+	if err != nil {
+		return err
+	}
+	defer release()
+
 	target := &publish.Local{
 		Dir:  destDir,
 		Logf: func(format string, a ...any) { fmt.Printf("  "+format+"\n", a...) },
@@ -655,6 +663,9 @@ func cmdPack(args []string) error {
 			i++
 			proxy = args[i]
 		default:
+			if strings.HasPrefix(args[i], "-") {
+				return fmt.Errorf("未知开关: %s（可选 --rebuild / --full / -r / --proxy）", args[i])
+			}
 			pos = append(pos, args[i])
 		}
 	}

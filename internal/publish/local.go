@@ -92,6 +92,11 @@ func fileMatches(path, want string) bool {
 }
 
 func copyFile(src, dst string) error {
+	// dst 已是符号链接时拒绝：OpenFile 会顺着链接写到别处去，
+	// 目标目录里预置一个链接就能覆盖任意文件（测试报告 A4）。
+	if info, err := os.Lstat(dst); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("目标已是符号链接，拒绝覆盖: %s", dst)
+	}
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return err
 	}

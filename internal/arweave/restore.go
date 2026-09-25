@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	urlpkg "net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -148,13 +149,23 @@ func checkDirEmpty(abs string) error {
 // safeRestorePath 把 manifest 里的路径接到目标目录下，挡住越界。
 //
 // manifest 是从链上取回来的，属于外部输入，不能假定它里面的路径是乖的。
+// 校验与 webui 的 safeJoin 同构：前导分隔符直接拒（不静默相对化）、
+// Clean 后再判相对性、最后用 Rel 复核一遍。
 func safeRestorePath(root, rel string) (string, error) {
-	rel = strings.TrimPrefix(strings.ReplaceAll(rel, `\`, "/"), "/")
-	clean := path.Clean(rel)
-	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
+	if strings.HasPrefix(rel, "/") || strings.HasPrefix(rel, `\`) {
 		return "", fmt.Errorf("manifest 里的路径越界: %q", rel)
 	}
-	return filepath.Join(root, filepath.FromSlash(clean)), nil
+	rel = strings.ReplaceAll(rel, `\`, "/")
+	clean := path.Clean(rel)
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") || path.IsAbs(clean) {
+		return "", fmt.Errorf("manifest 里的路径越界: %q", rel)
+	}
+	full := filepath.Join(root, filepath.FromSlash(clean))
+	back, err := filepath.Rel(root, full)
+	if err != nil || strings.HasPrefix(back, "..") || filepath.IsAbs(back) {
+		return "", fmt.Errorf("manifest 里的路径越界: %q", rel)
+	}
+	return full, nil
 }
 
 // fetchBytes 从网关取一段原始内容。
@@ -163,10 +174,10 @@ func safeRestorePath(root, rel string) (string, error) {
 // 直接把 index 指向的那个文件吐出来（实测过，拿到的是一段 HTML），
 // 于是「取 manifest」就会失败在解 JSON 上。/raw/ 不做这层解析。
 //
-// limit 是读的上限：manifest 与单个文件都不该是无限的，
-// 给它一个封顶值，免得被一个坏响应喂爆内存。
+// limit 是读的上限：manifest 与单个文件都不该是无限的，读满即报错，
+// 不静默截断——截断的文件写盘会得到一份坏产物。
 func fetchBytes(ctx context.Context, gateway, id string, client *http.Client, limit int64) ([]byte, error) {
-	url := strings.TrimRight(gateway, "/") + "/raw/" + strings.TrimLeft(id, "/")
+	url := strings.TrimRight(gateway, "/") + "/raw/" + urlpkg.PathEscape(strings.TrimLeft(id, "/"))
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
@@ -178,9 +189,12 @@ func fetchBytes(ctx context.Context, gateway, id string, client *http.Client, li
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, limit))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil {
 		return nil, err
+	}
+	if int64(len(body)) > limit {
+		return nil, fmt.Errorf("内容超过上限 %d 字节，拒绝写入", limit)
 	}
 	if resp.StatusCode != http.StatusOK {
 		// 刚发布的入口要等 bundle 落链后网关才解析得到。点明这一点，

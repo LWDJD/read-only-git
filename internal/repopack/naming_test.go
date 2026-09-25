@@ -5,6 +5,30 @@ import (
 	"testing"
 )
 
+// 尾随点/空格在 Win32 上与去尾后的名字指向同一目录，会互相覆盖；
+// 前导 - 会被 git 当开关解析。都拒绝。
+func TestIsValidNameRejectsTricky(t *testing.T) {
+	for _, name := range []string{"x.", "x ", "-x", "CONIN$", "conout$", "x/y"} {
+		if isValidName(name) {
+			t.Errorf("isValidName(%q) 应当拒绝", name)
+		}
+	}
+	for _, name := range []string{"demo", "demo-repo", "x2"} {
+		if !isValidName(name) {
+			t.Errorf("isValidName(%q) 应当接受", name)
+		}
+	}
+}
+
+func TestIsRemoteRejectsLeadingDash(t *testing.T) {
+	if IsRemote("-x@host:path") {
+		t.Fatal("前导 - 的串不该当远端（会被 git 当开关解析）")
+	}
+	if !IsRemote("user@host:path") {
+		t.Fatal("scp 风格应当认")
+	}
+}
+
 func TestNormalizeName(t *testing.T) {
 	cases := []struct {
 		in   string
