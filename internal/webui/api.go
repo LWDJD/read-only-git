@@ -40,12 +40,20 @@ func decodeBody(w http.ResponseWriter, r *http.Request, into any) bool {
 		writeErr(w, http.StatusMethodNotAllowed, fmt.Errorf("这个接口只接受 POST"))
 		return false
 	}
+	// 请求体上限：单请求不该能喂爆进程内存（文件替换的大请求也够用）。
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBytes)
 	if err := json.NewDecoder(r.Body).Decode(into); err != nil {
 		writeErr(w, http.StatusBadRequest, fmt.Errorf("请求体不是合法 JSON: %w", err))
 		return false
 	}
 	return true
 }
+
+// maxRequestBytes 是请求体上限（256 MiB）。
+//
+// 定高不为防什么攻击，只为拦住失控的客户端与损坏的请求：
+// 文件替换接口一次可能带很多 base64 文件，但也不会到这个量级。
+const maxRequestBytes = 256 << 20
 
 // safeJoin 把相对路径拼到站点根下，并挡住越界写法。
 //
@@ -403,8 +411,13 @@ func (s *Server) doPublish(t *Task, req publishRequest) error {
 
 	// 同一站点同一目标同时只允许一条发布在跑。
 	// 连点两下按钮就会撞到这里，与其两条发布互踩同一份记录，
-	// 不如直接把后一条拒掉，并告诉她原因。
-	release, err := publish.Acquire(site.Root, req.Target)
+	// 不如直接把后一条拒掉，并告诉她原因。本地目标按目录分键：
+	// 发到两个不同目录的两条发布不该互相挡。
+	lockName := req.Target
+	if req.Target == "local" {
+		lockName = "local:" + req.Dest
+	}
+	release, err := publish.Acquire(site.Root, lockName)
 	if err != nil {
 		return err
 	}
@@ -430,7 +443,13 @@ func (s *Server) publishLocal(t *Task, site *publish.Site, req publishRequest) e
 	}
 
 	target := &publish.Local{Dir: req.Dest, Logf: t.Logf}
-	statePath := publish.StatePath(site.Root, target.Name(), req.Dest)
+	// 记录身份用规范化后的绝对路径："out" 与 "./out" 是同一个地方，
+	// 不该生成两份记录把增量复用白白丢掉。
+	destKey := req.Dest
+	if abs, err := filepath.Abs(req.Dest); err == nil {
+		destKey = abs
+	}
+	statePath := publish.StatePath(site.Root, target.Name(), destKey)
 
 	prev, err := publish.LoadRecord(statePath)
 	if err != nil {

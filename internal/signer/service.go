@@ -9,6 +9,7 @@ package signer
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -164,12 +165,13 @@ func (s *Service) guard(next http.HandlerFunc) http.HandlerFunc {
 }
 
 // tokenOK 接受两种带法：header 给普通请求，query 是给 EventSource 一类
-// 无法自定义请求头的场合留的。
+// 无法自定义请求头的场合留的。比较用常量时间，不给旁路留时间差。
 func (s *Service) tokenOK(r *http.Request) bool {
-	if r.Header.Get("X-Rog-Token") == s.token {
-		return true
+	t := r.Header.Get("X-Rog-Token")
+	if t == "" {
+		t = r.URL.Query().Get("token")
 	}
-	return r.URL.Query().Get("token") == s.token
+	return subtle.ConstantTimeCompare([]byte(t), []byte(s.token)) == 1
 }
 
 // Close 关掉服务。
@@ -203,11 +205,8 @@ func (s *Service) SignTx(ctx context.Context, data []byte, tags []arweave.Tag) (
 	if sig.ID == "" {
 		return nil, fmt.Errorf("钱包回传的交易字段不完整（缺 id）")
 	}
-	// 页面自己把交易提交上去时，只需要一个 ID：
-	// 署名与提交都不在 Go 这边，也就不必要求它把签名字段一并回传。
-	if sig.Uploaded {
-		return &sig, nil
-	}
+	// 页面自己提交过（uploaded）时也要求字段完整：Go 侧会拿它们跑本地验签，
+	// 免检采信「页面说传好了」等于谁都能拿个假 id 把发布标成成功。
 	if sig.Owner == "" || sig.Signature == "" {
 		return nil, fmt.Errorf("钱包回传的交易字段不完整（缺 owner / signature）")
 	}
@@ -319,9 +318,13 @@ func (s *Service) handleSign(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(r.Body)
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxResultBytes(it)))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if int64(len(body)) >= maxResultBytes(it) {
+		http.Error(w, "签名结果超出合理大小", http.StatusBadRequest)
 		return
 	}
 
@@ -337,6 +340,18 @@ func (s *Service) handleSign(w http.ResponseWriter, r *http.Request) {
 
 	it.result <- body
 	w.WriteHeader(http.StatusNoContent)
+
+	// 结果已交付，缓存里的待签内容即刻释放。
+	// 不释放的话，大站点发布期间整站数据都攒在这个 map 里（测试报告 A18）。
+	s.mu.Lock()
+	delete(s.items, id)
+	s.mu.Unlock()
+}
+
+// maxResultBytes 给签名结果定一个上限：data item 回传的是「头 + 原数据」，
+// 体量可预估；tx 回传的只是字段 JSON。超出说明请求不对劲。
+func maxResultBytes(it *item) int64 {
+	return int64(len(it.data)) + 1<<20
 }
 
 func (s *Service) get(id string) *item {

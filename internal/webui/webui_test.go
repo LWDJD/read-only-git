@@ -1061,15 +1061,17 @@ func TestPublishRejectsWhenAlreadyRunning(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 先手动占住名额，模拟「已经有一条在跑」
-	release, err := publish.Acquire(abs, "local")
+	dest := t.TempDir()
+	// 先手动占住名额，模拟「已经有一条在跑」。锁名与请求一致：
+	// 本地发布按目标目录分键，同目录互斥、不同目录各跑各的。
+	release, err := publish.Acquire(abs, "local:"+dest)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer release()
 
 	code, out := postJSON(t, srv.baseURL()+"api/publish", map[string]any{
-		"site": site, "target": "local", "dest": t.TempDir(),
+		"site": site, "target": "local", "dest": dest,
 	})
 	if code != http.StatusOK {
 		t.Fatalf("建任务应当返回 200，实际 %d", code)

@@ -306,7 +306,13 @@ func cmdPublishLocal(siteDir, destDir string) error {
 		Logf: func(format string, a ...any) { fmt.Printf("  "+format+"\n", a...) },
 	}
 
-	statePath := publish.StatePath(site.Root, target.Name(), destDir)
+	// 记录身份用规范化后的绝对路径："out" 与 "./out" 是同一个地方，
+	// 不该生成两份记录把增量复用白白丢掉。
+	destKey := destDir
+	if abs, absErr := filepath.Abs(destDir); absErr == nil {
+		destKey = abs
+	}
+	statePath := publish.StatePath(site.Root, target.Name(), destKey)
 	prev, err := publish.LoadRecord(statePath)
 	if err != nil {
 		// 记录损坏只意味着复用信息丢失，按首次发布处理即可。

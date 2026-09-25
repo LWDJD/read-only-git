@@ -11,6 +11,7 @@ package webui
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"fmt"
 	"net"
@@ -192,12 +193,13 @@ func (s *Server) guard(next http.HandlerFunc) http.HandlerFunc {
 // tokenOK 接受两种带法。
 //
 // header 用于普通请求；query 是给 EventSource 留的，
-// 那个 API 不允许自定义请求头。
+// 那个 API 不允许自定义请求头。比较用常量时间。
 func (s *Server) tokenOK(r *http.Request) bool {
-	if r.Header.Get("X-Rog-Token") == s.token {
-		return true
+	t := r.Header.Get("X-Rog-Token")
+	if t == "" {
+		t = r.URL.Query().Get("token")
 	}
-	return r.URL.Query().Get("token") == s.token
+	return subtle.ConstantTimeCompare([]byte(t), []byte(s.token)) == 1
 }
 
 // SiteDir 返回默认站点目录。

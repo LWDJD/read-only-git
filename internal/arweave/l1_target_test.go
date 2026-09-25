@@ -349,6 +349,38 @@ func (s *uploadedStubSigner) SignTx(context.Context, []byte, []Tag) (*TxSignatur
 	return s.sig, nil
 }
 
+// uploadedSig 造一份「页面已自行提交」的回传。
+//
+// 字段必须完整：Go 侧现在会对它跑本地验签（uploaded 不再免检），
+// 假字段会被当场拦下。
+func uploadedSig(t *testing.T, postStatus, status int, postBody string) *TxSignature {
+	t.Helper()
+	// reward 用一个显眼的值：日志断言要能在输出里认出它
+	sig, err := fakeSignedSig(BundleTags("demo"), "3300994621", "520")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig.Uploaded = true
+	sig.PostStatus = postStatus
+	sig.Status = status
+	sig.PostBody = postBody
+	return sig
+}
+
+// uploaded 不再免检：签名对不上的「已提交」回传不能当成功。
+func TestL1RejectsUnverifiedUploaded(t *testing.T) {
+	bad := uploadedSig(t, 200, 200, "")
+	bad.ID = "forged-id" // 破坏 id 与签名的绑定，本地验签必须拦下
+	target := &Target{
+		Repo:     "demo",
+		TxSigner: &uploadedStubSigner{sig: bad},
+	}
+	err := target.submitL1(context.Background(), [][]byte{makeDataItem(0x66, 520)}, "root-id", 0)
+	if err == nil || !strings.Contains(err.Error(), "验签没过") {
+		t.Fatalf("伪造的 uploaded 回传应当被验签拦下，实际 %v", err)
+	}
+}
+
 // 页面提交之后，日志要把 POST 的状态与节点原话都记下来。
 //
 // 线上撞过「POST 说受理、事后查不到」，那时日志里只有事后状态，
@@ -356,12 +388,8 @@ func (s *uploadedStubSigner) SignTx(context.Context, []byte, []Tag) (*TxSignatur
 func TestL1LogsPostStatusAndBody(t *testing.T) {
 	var lines []string
 	target := &Target{
-		Repo: "demo",
-		TxSigner: &uploadedStubSigner{sig: &TxSignature{
-			ID: "tx-abc", Uploaded: true,
-			PostStatus: 202, Status: 404,
-			Reward: "3300994621", PostBody: "some node message",
-		}},
+		Repo:     "demo",
+		TxSigner: &uploadedStubSigner{sig: uploadedSig(t, 202, 404, "some node message")},
 		Logf: func(format string, args ...any) {
 			lines = append(lines, fmt.Sprintf(format, args...))
 		},
@@ -383,9 +411,7 @@ func TestL1WarnsOnStaleStatus(t *testing.T) {
 	var lines []string
 	target := &Target{
 		Repo: "demo",
-		TxSigner: &uploadedStubSigner{sig: &TxSignature{
-			ID: "tx-abc", Uploaded: true, PostStatus: 200, Status: 404, Reward: "1",
-		}},
+		TxSigner: &uploadedStubSigner{sig: uploadedSig(t, 200, 404, "")},
 		Logf: func(format string, args ...any) {
 			lines = append(lines, fmt.Sprintf(format, args...))
 		},

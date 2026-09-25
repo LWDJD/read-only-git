@@ -268,8 +268,13 @@ func (t *Target) submitL1(ctx context.Context, pending [][]byte, root string, re
 		return fmt.Errorf("签名交易失败: %w", err)
 	}
 
-	// 页面已经提交过了，直接用它的 ID。
+	// 页面已经提交过了。但「页面说传好了」不能免检采信：
+	// 拿一个假 id 就能把发布标成成功（测试报告 A10/A14）。
+	// 页面已回传完整签名字段，这里按节点口径验一遍再记成功。
 	if sig.Uploaded {
+		if err := VerifySignedTx(sig, tags); err != nil {
+			return fmt.Errorf("页面报告交易已提交，但本地验签没过（%v）：不能当成功", err)
+		}
 		// 两个状态都要记：POST 那一刻节点回了什么，事后还查不查得到。
 		// 「节点接受了但随后查不到」这类问题，只有响应原话能说清。
 		t.logf("交易 %s（单块，页面已提交；POST %d，事后状态 %d，reward %s）",
