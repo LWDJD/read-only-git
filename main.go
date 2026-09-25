@@ -44,6 +44,8 @@ func run(args []string) error {
 		return cmdSite(args[1:])
 	case "publish":
 		return cmdPublish(args[1:])
+	case "verify":
+		return cmdVerify(args[1:])
 	case "nodes":
 		return cmdNodes(args[1:])
 	case "webui":
@@ -98,6 +100,16 @@ func usage(w *os.File) {
 	fmt.Fprintln(w, "publish 会复用上一次的发布记录（存在 <站点目录>/.rog/ 下），")
 	fmt.Fprintln(w, "只处理内容变化的文件。记录本身也会随站点上链，")
 	fmt.Fprintln(w, "换机器时用 --from 就能取回来。")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "verify 的选项（手动核对链上可读性，不做任何自动动作）:")
+	fmt.Fprintln(w, "  --repo <名字>      记录身份，与发布时一致；默认取站点目录名")
+	fmt.Fprintln(w, "  --gateway <地址>   用哪个网关查，可重复给多个（多网关对比）；")
+	fmt.Fprintln(w, "                     不给就用内置清单全查")
+	fmt.Fprintln(w, "  --from <入口 id>   不用本地记录，从链上取一份来核对")
+	fmt.Fprintln(w, "  --no-content       只查可读性，不取内容比对摘要（默认比对，宁慢勿错）")
+	fmt.Fprintln(w, "  --repair           把查不到/摘要不符的引用从记录里清掉；")
+	fmt.Fprintln(w, "                     清完跑一次正常发布即可补上，不自动发布")
+	fmt.Fprintln(w, "  --proxy / --proxy-url  网络出口，与 publish 同义")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "webui 的选项:")
 	fmt.Fprintln(w, "  --site <目录>   默认操作的站点目录，默认 ./public")
@@ -564,6 +576,154 @@ func openBrowser(url string) {
 		cmd = exec.Command("xdg-open", url)
 	}
 	_ = cmd.Start()
+}
+
+// cmdVerify 手动核对一次发布在链上的可读性。
+//
+// 它是独立功能：只读、只报告，需要动手时只有 --repair 一个开关，
+// 而 repair 只清本地记录——补传永远走正常增量发布，不造第二条上传路径。
+func cmdVerify(args []string) error {
+	var gateways []string
+	repo := ""
+	fromEntry := ""
+	checkContent := true
+	repair := false
+	proxyMode := ""
+	proxyURL := ""
+	var pos []string
+
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "-h", "--help":
+			usage(os.Stdout)
+			return nil
+		case "--repo":
+			if i+1 >= len(args) {
+				return fmt.Errorf("--repo 后面缺少值")
+			}
+			i++
+			repo = args[i]
+		case "--gateway":
+			if i+1 >= len(args) {
+				return fmt.Errorf("--gateway 后面缺少值")
+			}
+			i++
+			gateways = append(gateways, args[i])
+		case "--from":
+			if i+1 >= len(args) {
+				return fmt.Errorf("--from 后面缺少值")
+			}
+			i++
+			fromEntry = args[i]
+		case "--no-content", "--no-check-content":
+			checkContent = false
+		case "--check-content":
+			checkContent = true
+		case "--repair":
+			repair = true
+		case "--proxy":
+			if i+1 >= len(args) {
+				return fmt.Errorf("--proxy 后面缺少值")
+			}
+			i++
+			proxyMode = args[i]
+		case "--proxy-url":
+			if i+1 >= len(args) {
+				return fmt.Errorf("--proxy-url 后面缺少值")
+			}
+			i++
+			proxyURL = args[i]
+		default:
+			if strings.HasPrefix(args[i], "-") {
+				return fmt.Errorf("未知开关: %s", args[i])
+			}
+			pos = append(pos, args[i])
+		}
+	}
+	if len(pos) == 0 {
+		return fmt.Errorf("用法: rog verify <站点目录> [--repo 名字] [--gateway 地址…] [--from 入口id] [--no-content] [--repair]")
+	}
+
+	siteRoot, err := filepath.Abs(pos[0])
+	if err != nil {
+		return err
+	}
+	if repo == "" {
+		repo = filepath.Base(siteRoot)
+	}
+
+	mode, err := arweave.ParseProxyMode(proxyMode)
+	if err != nil {
+		return err
+	}
+	if mode == arweave.ProxyManual && proxyURL == "" {
+		return fmt.Errorf("手动代理模式需要 --proxy-url")
+	}
+	client, err := arweave.NewClient(arweave.ProxyConfig{Mode: mode, URL: proxyURL}, 0)
+	if err != nil {
+		return err
+	}
+
+	statePath := publish.StatePath(siteRoot, "arweave", repo)
+	var rec *publish.Record
+	if fromEntry != "" {
+		gw := arweave.DefaultGateway
+		if len(gateways) > 0 {
+			gw = gateways[0]
+		}
+		rec, err = arweave.FetchRecordWithClient(context.Background(), gw, fromEntry,
+			publish.RecordRelPath("arweave", repo), client)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("> 记录取自链上入口 %s（%d 个引用）\n", fromEntry, len(rec.Refs))
+	} else {
+		rec, err = publish.LoadRecord(statePath)
+		if err != nil {
+			return fmt.Errorf("读发布记录失败: %w（可用 --from 从链上取一份）", err)
+		}
+		if rec == nil {
+			return fmt.Errorf("%s 还没有发布记录；先发布一次，或用 --from 从链上取", statePath)
+		}
+	}
+
+	if len(gateways) == 0 {
+		gateways = append(gateways, arweave.KnownNodes...)
+	}
+	fmt.Printf("站点   %s\n仓库   %s\n网关   %s\n摘要   %s\n\n",
+		siteRoot, repo, strings.Join(gateways, "、"), map[bool]string{true: "核对（取内容比对）", false: "不核对（只查可读）"}[checkContent])
+
+	report, err := arweave.CheckSite(context.Background(), arweave.CheckOptions{
+		Record:       rec,
+		Gateways:     gateways,
+		Client:       client,
+		CheckContent: checkContent,
+		Repair:       repair,
+		Logf:         func(format string, a ...any) { fmt.Printf("  "+format+"\n", a...) },
+	})
+	if err != nil {
+		return err
+	}
+
+	fmt.Println()
+	fmt.Printf("v 汇总：可读 %d、疑似索引未完成 %d、查不到 %d、摘要不符 %d、网关不可达 %d（用时 %s）\n",
+		report.OK, report.Partial, report.Missing, report.Mismatch, report.Unreachable,
+		report.Duration.Round(time.Millisecond))
+
+	if repair {
+		if err := publish.SaveRecord(statePath, rec); err != nil {
+			return err
+		}
+		fmt.Printf("v 已清掉 %d 条坏引用并写入 %s\n", report.Repaired, statePath)
+		if report.Repaired > 0 {
+			fmt.Println("  下一步：跑一次正常发布补上（rog publish <站点> --arweave [--l1]）")
+		}
+	} else if report.Missing+report.Mismatch > 0 {
+		fmt.Println()
+		fmt.Printf("! 有 %d 条坏引用。用 --repair 清掉它们，再跑一次正常发布即可补上\n",
+			report.Missing+report.Mismatch)
+	}
+	return nil
 }
 
 // cmdNodes 探测发布时可用的网关，告诉用户此刻该填哪个。

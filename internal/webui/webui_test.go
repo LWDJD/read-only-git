@@ -1516,6 +1516,47 @@ func TestResolveSiteOnlyAllowsStartupDir(t *testing.T) {
 	}
 }
 
+// 检查与补传面板要存在，且两个动作分开（检查只读、修复单独按钮）。
+func TestPageHasVerifyPanel(t *testing.T) {
+	for _, needle := range []string{"检查与补传", "doVerify", "doVerifyRepair", "核对内容摘要"} {
+		if !strings.Contains(DefaultPage, needle) {
+			t.Errorf("页面缺少 %q", needle)
+		}
+	}
+}
+
+// 检查接口：没有发布记录时任务要报清楚，而不是空转。
+func TestVerifyReportsMissingRecord(t *testing.T) {
+	site := t.TempDir()
+	srv := newTestServer(t, site)
+
+	code, out := postJSON(t, srv.baseURL()+"api/verify", map[string]any{
+		"site": site, "checkContent": true,
+	})
+	if code != http.StatusOK {
+		t.Fatalf("建任务应当返回 200，实际 %d", code)
+	}
+	taskID, _ := out["taskId"].(string)
+	if taskID == "" {
+		t.Fatal("应当返回 taskId")
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		var snap map[string]any
+		getJSON(t, srv.baseURL()+"api/task/"+taskID, &snap)
+		if snap["status"] == "failed" {
+			msg, _ := snap["error"].(string)
+			if !strings.Contains(msg, "还没有发布记录") {
+				t.Fatalf("应当说清没有发布记录，实际 %q", msg)
+			}
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatal("任务迟迟不结束")
+}
+
 func TestPageRestoreExplainsEmptyDir(t *testing.T) {
 	if !strings.Contains(DefaultPage, "必须是空目录") {
 		t.Error("恢复面板应当写明目标目录必须为空")

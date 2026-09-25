@@ -564,6 +564,125 @@ func (s *Server) publishArweave(t *Task, site *publish.Site, req publishRequest,
 	return nil
 }
 
+// ---------- 检查与补传 ----------
+
+type verifyRequest struct {
+	Site     string   `json:"site"`
+	Gateways []string `json:"gateways"`
+	// From 非空时不用本地记录，从链上取一份来核对。
+	From         string `json:"from"`
+	CheckContent bool   `json:"checkContent"`
+	// 网络出口与发布面板同源。
+	ProxyMode string `json:"proxyMode"`
+	ProxyURL  string `json:"proxyUrl"`
+}
+
+func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
+	s.doVerify(w, r, false)
+}
+
+// handleVerifyRepair 清坏引用：检查 + 把 missing/mismatch 的从记录里删掉。
+//
+// 补传不在这里做：清完跑一次正常发布即可。界面两个按钮两个端点，
+// 不做任何自动衔接。
+func (s *Server) handleVerifyRepair(w http.ResponseWriter, r *http.Request) {
+	s.doVerify(w, r, true)
+}
+
+func (s *Server) doVerify(w http.ResponseWriter, r *http.Request, repair bool) {
+	var req verifyRequest
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	site, err := s.resolveSite(req.Site)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	repo := repoNameFor(site)
+
+	mode, err := arweave.ParseProxyMode(req.ProxyMode)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if mode == arweave.ProxyManual && strings.TrimSpace(req.ProxyURL) == "" {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("手动代理模式需要填代理地址"))
+		return
+	}
+	client, err := arweave.NewClient(arweave.ProxyConfig{Mode: mode, URL: req.ProxyURL}, 0)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	gateways := make([]string, 0, len(req.Gateways))
+	for _, g := range req.Gateways {
+		if g = strings.TrimSpace(g); g != "" {
+			gateways = append(gateways, g)
+		}
+	}
+	if len(gateways) == 0 {
+		gateways = append(gateways, arweave.KnownNodes...)
+	}
+
+	id := s.tasks.Run("verify", func(t *Task) {
+		statePath := publish.StatePath(site, "arweave", repo)
+		var rec *publish.Record
+		if req.From != "" {
+			rec, err = arweave.FetchRecordWithClient(context.Background(), gateways[0], req.From,
+				publish.RecordRelPath("arweave", repo), client)
+			if err != nil {
+				t.fail(err)
+				return
+			}
+			t.Logf("记录取自链上入口 %s（%d 个引用）", req.From, len(rec.Refs))
+		} else {
+			rec, err = publish.LoadRecord(statePath)
+			if err != nil {
+				t.fail(fmt.Errorf("读发布记录失败: %w（可改用入口 id 从链上取）", err))
+				return
+			}
+			if rec == nil {
+				t.fail(fmt.Errorf("%s 还没有发布记录；先发布一次，或用入口 id 从链上取", statePath))
+				return
+			}
+		}
+
+		t.Logf("网关 %s；摘要核对 %s", strings.Join(gateways, "、"), map[bool]string{true: "开", false: "关"}[req.CheckContent])
+
+		report, err := arweave.CheckSite(context.Background(), arweave.CheckOptions{
+			Record:       rec,
+			Gateways:     gateways,
+			Client:       client,
+			CheckContent: req.CheckContent,
+			Repair:       repair,
+			Logf:         t.Logf,
+		})
+		if err != nil {
+			t.fail(err)
+			return
+		}
+
+		if repair {
+			if err := publish.SaveRecord(statePath, rec); err != nil {
+				t.fail(err)
+				return
+			}
+			t.Logf("已清掉 %d 条坏引用并写入记录", report.Repaired)
+			if report.Repaired > 0 {
+				t.Logf("下一步：回「发布」面板跑一次发布，缺失的文件会重新签名上传")
+			}
+		} else if report.Missing+report.Mismatch > 0 {
+			t.Logf("有 %d 条坏引用。点「清理坏引用」清掉它们，再发布一次即可补上",
+				report.Missing+report.Mismatch)
+		}
+
+		t.succeed(map[string]any{"report": report})
+	})
+	writeJSON(w, map[string]string{"taskId": id})
+}
+
 // ---------- 站点骨架 ----------
 
 type siteInitRequest struct {

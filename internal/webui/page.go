@@ -89,6 +89,12 @@ const DefaultPage = `<!doctype html>
     border: 1px solid var(--field-border); border-radius: 4px;
     background: var(--field-bg); color: var(--fg);
   }
+  textarea {
+    width: 100%; padding: 6px 8px; font: inherit; font-size: 13px;
+    border: 1px solid var(--field-border); border-radius: 4px;
+    background: var(--field-bg); color: var(--fg);
+    resize: vertical;
+  }
   input::placeholder { color: var(--muted); opacity: .75; }
   .row { display: flex; gap: 8px; }
   .row > * { flex: 1; }
@@ -223,6 +229,20 @@ const DefaultPage = `<!doctype html>
       </div>
       <p class="muted" style="margin:0">仓库名取站点目录名，不用填。</p>
       <button class="primary" id="doPublish">开始发布</button>
+    </section>
+
+    <section class="panel" id="verifyPanel">
+      <h2>检查与补传</h2>
+      <p class="muted" style="margin:0 0 8px">核对上次发布在链上还能不能读到。只读、只报告；清理坏引用是单独一步，清完跑一次发布即补上，不会自动发布。</p>
+      <label>网关（可填多个，逗号或换行分隔；留空用内置清单全查）</label>
+      <textarea id="verifyGateways" rows="2" placeholder="https://arweave.net, https://permagate.io"></textarea>
+      <label>从入口 id 取记录（可选，留空用本地记录）</label>
+      <input id="verifyFrom" placeholder="re22tX-…">
+      <label><input type="checkbox" id="verifyContent" style="width:auto" checked> 核对内容摘要（取回内容比对，慢但准）</label>
+      <p class="muted" style="margin:0">网络出口沿用上面「网络出口」的设置。</p>
+      <button class="primary" id="doVerify">开始检查</button>
+      <button id="doVerifyRepair">清理坏引用</button>
+      <div id="verifyResult"></div>
     </section>
 
     <section class="panel" id="restorePanel">
@@ -1176,7 +1196,7 @@ const DefaultPage = `<!doctype html>
   // 打包与发布都不该并发跑：连点两下就是对着同一个目录各干一遍，
   // 而且两边都以为自己在改同一份东西。后端也有自己的锁，
   // 但让按钮当场变灰更直接——用户不用等到报错才知道已经在跑了。
-  var BUSY_BUTTONS = ['doPack', 'doPublish', 'doSiteInit'];
+  var BUSY_BUTTONS = ['doPack', 'doPublish', 'doSiteInit', 'doVerify', 'doVerifyRepair'];
 
   function setBusy(busy) {
     BUSY_BUTTONS.forEach(function (id) {
@@ -1244,6 +1264,7 @@ const DefaultPage = `<!doctype html>
             log('完成', 'ok');
             lastTask = null;
           }
+          if (o.onResult && t.result) { o.onResult(t.result); }
           refresh();
         });
     });
@@ -1313,6 +1334,83 @@ const DefaultPage = `<!doctype html>
       sign: activeTarget !== 'local',
     });
   };
+
+  // ---- 检查与补传 ----
+  //
+  // 全手动：检查只读只报告；清理坏引用要再点一个按钮、过一次确认。
+  // 补传永远走正常发布，这里不接任何自动衔接。
+
+  function runVerify(repair) {
+    var gateways = el('verifyGateways').value.split(/[\s,;]+/).filter(Boolean);
+    runTask(repair ? '/api/verify/repair' : '/api/verify', {
+      site: site,
+      gateways: gateways,
+      from: el('verifyFrom').value.trim(),
+      checkContent: el('verifyContent').checked,
+      proxyMode: el('pubProxyMode').value,
+      proxyUrl: el('pubProxyUrl').value.trim(),
+    }, repair ? '清理坏引用' : '检查链上可读性', {
+      sign: false,
+      onResult: renderVerifyResult,
+    });
+  }
+
+  el('doVerify').onclick = function () { runVerify(false); };
+
+  el('doVerifyRepair').onclick = function () {
+    if (!confirm('把查不到或摘要不符的引用从发布记录里清掉？\n\n清完之后跑一次发布即可补上，这里不会自动发布。')) return;
+    runVerify(true);
+  };
+
+  // renderVerifyResult 把核对报告画成清单。只列有问题的行：
+  // 全部可读时一句话就够，不铺三十行绿字。
+  function renderVerifyResult(result) {
+    var rep = result && result.report;
+    var box = el('verifyResult');
+    box.textContent = '';
+    if (!rep) return;
+
+    var head = document.createElement('div');
+    head.className = 'muted';
+    head.style.margin = '10px 0 6px';
+    head.textContent = '入口 ' + (rep.EntryOK ? '可读' : '不可读') + ' · ' +
+      '可读 ' + rep.OK + '、疑似索引未完成 ' + rep.Partial +
+      '、查不到 ' + rep.Missing + '、摘要不符 ' + rep.Mismatch +
+      '、网关不可达 ' + rep.Unreachable;
+    box.appendChild(head);
+
+    var bad = (rep.Items || []).filter(function (it) { return it.Verdict !== 'ok'; });
+    if (!bad.length) {
+      var all = document.createElement('div');
+      all.className = 'ok';
+      all.textContent = '全部可读，没有需要处理的引用。';
+      box.appendChild(all);
+      return;
+    }
+
+    var labels = { missing: '查不到', partial: '索引未完', mismatch: '摘要不符', unreachable: '网关不可达' };
+    var table = document.createElement('table');
+    table.innerHTML = '<thead><tr><th>结论</th><th>路径</th><th>说明</th></tr></thead>';
+    var tb = document.createElement('tbody');
+    bad.forEach(function (it) {
+      var tr = document.createElement('tr');
+      var td0 = document.createElement('td');
+      var b = document.createElement('span');
+      b.className = it.Verdict === 'partial' ? 'warn' : 'err';
+      b.textContent = labels[it.Verdict] || it.Verdict;
+      td0.appendChild(b);
+      var td1 = document.createElement('td');
+      td1.className = 'mono';
+      td1.textContent = it.Path;
+      var td2 = document.createElement('td');
+      td2.className = 'muted';
+      td2.textContent = it.Detail || '';
+      tr.appendChild(td0); tr.appendChild(td1); tr.appendChild(td2);
+      tb.appendChild(tr);
+    });
+    table.appendChild(tb);
+    box.appendChild(table);
+  }
 
   // 从链上恢复：把链上的站点内容取回一个空目录。
   //
