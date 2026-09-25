@@ -119,6 +119,8 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/api/site/init", s.guard(s.handleSiteInit))
 	mux.HandleFunc("/api/pack", s.guard(s.handlePack))
 	mux.HandleFunc("/api/publish", s.guard(s.handlePublish))
+	mux.HandleFunc("/api/verify", s.guard(s.handleVerify))
+	mux.HandleFunc("/api/verify/repair", s.guard(s.handleVerifyRepair))
 	mux.HandleFunc("/api/restore", s.guard(s.handleRestore))
 	mux.HandleFunc("/api/files/replace", s.guard(s.handleFileReplace))
 	mux.HandleFunc("/api/files/delete", s.guard(s.handleFileDelete))

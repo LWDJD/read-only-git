@@ -76,20 +76,67 @@ const DefaultPage = `<!doctype html>
   }
   header h1 { font-size: 16px; margin: 0; }
   .muted { color: var(--muted); font-size: 13px; }
-  main { display: grid; grid-template-columns: 380px minmax(0, 1fr); gap: 16px; padding: 16px 20px; }
+  main { display: grid; grid-template-columns: minmax(380px, 460px) minmax(0, 1fr); gap: 16px; padding: 16px 20px; }
   @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
   .panel {
     background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
     padding: 12px 14px; margin-bottom: 14px;
   }
   .panel h2 { font-size: 13px; margin: 0 0 10px; letter-spacing: .02em; }
+
+  /* 左栏是面包屑切换卡片：一行流程导航，下面一次只亮一张卡 */
+  .flowbar {
+    display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+    margin: 0 0 12px; font-size: 13px;
+  }
+  .flowbar a {
+    cursor: pointer; padding: 4px 10px; border: 1px solid var(--border);
+    border-radius: 14px; background: var(--btn); color: var(--fg);
+    text-decoration: none; white-space: nowrap;
+  }
+  .flowbar a:hover { background: var(--btn-hover); }
+  .flowbar a.active {
+    background: var(--accent); border-color: var(--accent-strong);
+    color: var(--on-accent); font-weight: 600;
+  }
+  .flowbar .sep { color: var(--muted); }
+
+  /* 网络出口是全局设置，常驻在面包屑下方，不跟着卡片切换藏起来 */
+  .netbar {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    margin: 0 0 12px; padding: 8px 12px;
+    border: 1px solid var(--border); border-radius: 6px;
+    background: var(--panel); font-size: 13px;
+  }
+  .netbar select { width: 150px; flex: none; }
+  .netbar input { flex: 1; min-width: 180px; }
+  .netbar .muted { white-space: nowrap; font-size: 12px; }
+
+  /* 显式声明：hidden 属性优先级最低，不写这条会被上面的样式顶掉（硬约束 8） */
+  .panel.step[hidden] { display: none; }
   label { display: block; font-size: 12px; margin: 8px 0 3px; color: var(--muted); }
   input, select {
     width: 100%; padding: 6px 8px; font: inherit; font-size: 13px;
     border: 1px solid var(--field-border); border-radius: 4px;
     background: var(--field-bg); color: var(--fg);
   }
+  textarea {
+    width: 100%; padding: 6px 8px; font: inherit; font-size: 13px;
+    border: 1px solid var(--field-border); border-radius: 4px;
+    background: var(--field-bg); color: var(--fg);
+    resize: vertical;
+  }
   input::placeholder { color: var(--muted); opacity: .75; }
+
+  /* 检查结果：限高滚动，不让长列表把左栏拉成一条巨长的柱子 */
+  #verifyResult { max-height: 340px; overflow: auto; margin-top: 4px; }
+  #verifyResult table { border: 1px solid var(--border); border-radius: 4px; }
+  #verifyResult th, #verifyResult td { padding: 4px 8px; font-size: 12px; }
+  .vbadge {
+    display: inline-block; padding: 1px 8px; border-radius: 10px;
+    font-size: 11px; white-space: nowrap;
+    background: var(--chip);
+  }
   .row { display: flex; gap: 8px; }
   .row > * { flex: 1; }
   button {
@@ -161,7 +208,26 @@ const DefaultPage = `<!doctype html>
 
 <main>
   <div>
-    <section class="panel" id="scaffoldPanel">
+    <div class="flowbar" id="flowbar">
+      <a data-step="scaffold">站点骨架</a><span class="sep">›</span>
+      <a data-step="pack">打包</a><span class="sep">›</span>
+      <a data-step="publish">发布</a><span class="sep">›</span>
+      <a data-step="verify">检查与补传</a><span class="sep">›</span>
+      <a data-step="restore">从链上恢复</a>
+    </div>
+
+    <div class="netbar">
+      <span class="muted">网络出口</span>
+      <select id="pubProxyMode">
+        <option value="system">跟随系统代理</option>
+        <option value="manual">手动指定</option>
+        <option value="off">不走代理</option>
+      </select>
+      <input id="pubProxyUrl" placeholder="http://127.0.0.1:7890">
+      <span class="muted">全局：发布、检查、恢复共用（打包拉远端的 git 代理在打包卡里另填）</span>
+    </div>
+
+    <section class="panel step" data-step="scaffold" id="scaffoldPanel">
       <h2>站点骨架</h2>
       <p class="muted" id="scaffoldHint" style="margin:0 0 8px">…</p>
       <label>模板</label>
@@ -170,16 +236,20 @@ const DefaultPage = `<!doctype html>
       <button class="primary" id="doSiteInit">铺开骨架</button>
     </section>
 
-    <section class="panel">
+    <section class="panel step" data-step="pack">
       <h2>打包</h2>
       <label>源仓库（本地路径，或远端地址）</label>
       <input id="packSource" placeholder="D:\path\to\repo">
-      <label>输出目录（站点根）</label>
       <div class="row">
-        <input id="packOut" placeholder="public" value="public">
+        <div>
+          <label>输出目录（站点根）</label>
+          <input id="packOut" placeholder="public" value="public">
+        </div>
+        <div>
+          <label>仓库名（留空则从源推导）</label>
+          <input id="packName" placeholder="myrepo">
+        </div>
       </div>
-      <label>仓库名（留空则从源推导）</label>
-      <input id="packName" placeholder="myrepo">
       <label>远端源代理（可选，拉远端仓库时用）</label>
       <input id="packProxy" placeholder="http://127.0.0.1:7890">
       <label><input type="checkbox" id="packRebuild" style="width:auto"> 完整重打包（忽略已有产物，从零重建）</label>
@@ -187,7 +257,7 @@ const DefaultPage = `<!doctype html>
       <button class="primary" id="doPack">开始打包</button>
     </section>
 
-    <section class="panel">
+    <section class="panel step" data-step="publish">
       <h2>发布</h2>
       <div class="tabs" id="targetTabs">
         <button data-target="local">本地目录</button>
@@ -212,20 +282,29 @@ const DefaultPage = `<!doctype html>
         </datalist>
         <p class="muted" style="margin:0">交易先交给网关、再由它转给节点，这一跳不通就会「看似成功、实则没到场」。上面这几个都是能应答的，也可以用 <code>rog nodes</code> 现场探一下哪个快。</p>
       </div>
-      <label>网络出口（发布时访问节点与网关）</label>
-      <div class="row">
-        <select id="pubProxyMode" style="flex:1">
-          <option value="system">跟随系统代理</option>
-          <option value="manual">手动指定</option>
-          <option value="off">不走代理</option>
-        </select>
-        <input id="pubProxyUrl" placeholder="http://127.0.0.1:7890" style="flex:2">
-      </div>
       <p class="muted" style="margin:0">仓库名取站点目录名，不用填。</p>
       <button class="primary" id="doPublish">开始发布</button>
     </section>
 
-    <section class="panel" id="restorePanel">
+    <section class="panel step" data-step="verify" id="verifyPanel">
+      <h2>检查与补传</h2>
+      <p class="muted" style="margin:0 0 8px">核对上次发布在链上还能不能读到。只读、只报告；清理坏引用是单独一步，清完跑一次发布即补上，不会自动发布。</p>
+      <label>网关（可填多个，逗号或换行分隔；留空用内置清单全查）</label>
+      <textarea id="verifyGateways" rows="2" placeholder="https://arweave.net, https://permagate.io"></textarea>
+      <div class="row">
+        <div>
+          <label>从入口 id 取记录（可选，留空用本地记录）</label>
+          <input id="verifyFrom" placeholder="re22tX-…">
+        </div>
+      </div>
+      <label><input type="checkbox" id="verifyContent" style="width:auto" checked> 核对内容摘要（慢但准）</label>
+      <p class="muted" style="margin:0">网络出口用顶部那条全局设置。</p>
+      <button class="primary" id="doVerify">开始检查</button>
+      <button id="doVerifyRepair">清理坏引用</button>
+      <div id="verifyResult"></div>
+    </section>
+
+    <section class="panel step" data-step="restore" id="restorePanel">
       <h2>从链上恢复</h2>
       <p class="muted" style="margin:0 0 8px">按入口 id 把站点内容取回到一个空目录。与发布是两件事：发布是往外写，这个是往本地拿回来。</p>
       <label>入口 id</label>
@@ -238,13 +317,6 @@ const DefaultPage = `<!doctype html>
       <button class="primary" id="doRestore">开始恢复</button>
     </section>
 
-    <section class="panel">
-      <h2>记录</h2>
-      <table>
-        <thead><tr><th>记录</th><th>目标</th><th>引用</th><th>更新时间</th></tr></thead>
-        <tbody id="records"></tbody>
-      </table>
-    </section>
   </div>
 
   <div>
@@ -264,6 +336,14 @@ const DefaultPage = `<!doctype html>
       </div>
       <div class="crumbs" id="crumbs"></div>
       <div class="tree" id="files"></div>
+    </section>
+
+    <section class="panel">
+      <h2>记录</h2>
+      <table>
+        <thead><tr><th>记录</th><th>目标</th><th>引用</th><th>更新时间</th></tr></thead>
+        <tbody id="records"></tbody>
+      </table>
     </section>
   </div>
 </main>
@@ -684,6 +764,16 @@ const DefaultPage = `<!doctype html>
       });
       rb.appendChild(tr);
     });
+    // 空表头挂着很怪，给一句占位
+    if (!(st.records || []).length) {
+      var tr = document.createElement('tr');
+      var td = document.createElement('td');
+      td.colSpan = 4;
+      td.className = 'muted';
+      td.textContent = '还没有发布记录。';
+      tr.appendChild(td);
+      rb.appendChild(tr);
+    }
   }
 
   // ---- 站点文件：逐层浏览 ----
@@ -1176,7 +1266,33 @@ const DefaultPage = `<!doctype html>
   // 打包与发布都不该并发跑：连点两下就是对着同一个目录各干一遍，
   // 而且两边都以为自己在改同一份东西。后端也有自己的锁，
   // 但让按钮当场变灰更直接——用户不用等到报错才知道已经在跑了。
-  var BUSY_BUTTONS = ['doPack', 'doPublish', 'doSiteInit'];
+  var BUSY_BUTTONS = ['doPack', 'doPublish', 'doSiteInit', 'doVerify', 'doVerifyRepair'];
+
+  // ---- 面包屑切换卡片 ----
+  //
+  // 五个操作各是一张卡，面包屑就是流程顺序（骨架→打包→发布→检查→恢复），
+  // 一次只亮一张。默认落在「发布」：日常最高频的那一步。
+  var currentStep = 'publish';
+
+  function showStep(step) {
+    Array.prototype.forEach.call(document.querySelectorAll('.panel.step'), function (p) {
+      p.hidden = p.dataset.step !== step;
+    });
+    Array.prototype.forEach.call(el('flowbar').querySelectorAll('a'), function (a) {
+      a.classList.toggle('active', a.dataset.step === step);
+    });
+    currentStep = step;
+  }
+
+  el('flowbar').addEventListener('click', function (e) {
+    var t = e.target;
+    if (t && t.dataset && t.dataset.step) {
+      e.preventDefault();
+      showStep(t.dataset.step);
+    }
+  });
+
+  showStep(currentStep);
 
   function setBusy(busy) {
     BUSY_BUTTONS.forEach(function (id) {
@@ -1244,6 +1360,7 @@ const DefaultPage = `<!doctype html>
             log('完成', 'ok');
             lastTask = null;
           }
+          if (o.onResult && t.result) { o.onResult(t.result); }
           refresh();
         });
     });
@@ -1313,6 +1430,83 @@ const DefaultPage = `<!doctype html>
       sign: activeTarget !== 'local',
     });
   };
+
+  // ---- 检查与补传 ----
+  //
+  // 全手动：检查只读只报告；清理坏引用要再点一个按钮、过一次确认。
+  // 补传永远走正常发布，这里不接任何自动衔接。
+
+  function runVerify(repair) {
+    var gateways = el('verifyGateways').value.split(/[\s,;]+/).filter(Boolean);
+    runTask(repair ? '/api/verify/repair' : '/api/verify', {
+      site: site,
+      gateways: gateways,
+      from: el('verifyFrom').value.trim(),
+      checkContent: el('verifyContent').checked,
+      proxyMode: el('pubProxyMode').value,
+      proxyUrl: el('pubProxyUrl').value.trim(),
+    }, repair ? '清理坏引用' : '检查链上可读性', {
+      sign: false,
+      onResult: renderVerifyResult,
+    });
+  }
+
+  el('doVerify').onclick = function () { runVerify(false); };
+
+  el('doVerifyRepair').onclick = function () {
+    if (!confirm('把查不到或摘要不符的引用从发布记录里清掉？\n\n清完之后跑一次发布即可补上，这里不会自动发布。')) return;
+    runVerify(true);
+  };
+
+  // renderVerifyResult 把核对报告画成清单。只列有问题的行：
+  // 全部可读时一句话就够，不铺三十行绿字。
+  function renderVerifyResult(result) {
+    var rep = result && result.report;
+    var box = el('verifyResult');
+    box.textContent = '';
+    if (!rep) return;
+
+    var head = document.createElement('div');
+    head.className = 'muted';
+    head.style.margin = '10px 0 6px';
+    head.textContent = '入口 ' + (rep.EntryOK ? '可读' : '不可读') + ' · ' +
+      '可读 ' + rep.OK + '（其中 ' + (rep.GatewayDiff || 0) + ' 条网关有差异）' +
+      '、查不到 ' + rep.Missing + '、摘要不符 ' + rep.Mismatch +
+      '、网关不可达 ' + rep.Unreachable;
+    box.appendChild(head);
+
+    var bad = (rep.Items || []).filter(function (it) { return it.Verdict !== 'ok'; });
+    if (!bad.length) {
+      var all = document.createElement('div');
+      all.className = 'ok';
+      all.textContent = '全部可读，没有需要处理的引用。';
+      box.appendChild(all);
+      return;
+    }
+
+    var labels = { missing: '查不到', mismatch: '摘要不符', unreachable: '网关不可达' };
+    var table = document.createElement('table');
+    table.innerHTML = '<thead><tr><th>结论</th><th>路径</th><th>说明</th></tr></thead>';
+    var tb = document.createElement('tbody');
+    bad.forEach(function (it) {
+      var tr = document.createElement('tr');
+      var td0 = document.createElement('td');
+      var b = document.createElement('span');
+      b.className = 'vbadge ' + (it.Verdict === 'unreachable' ? 'warn' : 'err');
+      b.textContent = labels[it.Verdict] || it.Verdict;
+      td0.appendChild(b);
+      var td1 = document.createElement('td');
+      td1.className = 'mono';
+      td1.textContent = it.Path;
+      var td2 = document.createElement('td');
+      td2.className = 'muted';
+      td2.textContent = it.Detail || '';
+      tr.appendChild(td0); tr.appendChild(td1); tr.appendChild(td2);
+      tb.appendChild(tr);
+    });
+    table.appendChild(tb);
+    box.appendChild(table);
+  }
 
   // 从链上恢复：把链上的站点内容取回一个空目录。
   //

@@ -22,6 +22,8 @@ public/*.git/
 /rog
 /rog.exe
 /rog.exe~
+/rog-dev.exe
+/rog-dev.exe~
 
 # 本地笔记：上下文备忘与待办方案，不作为项目内容
 HANDOFF.md
