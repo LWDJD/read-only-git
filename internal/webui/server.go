@@ -11,6 +11,7 @@ package webui
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"fmt"
 	"net"
@@ -134,11 +135,24 @@ func (s *Server) Start() error {
 	mux.Handle("/sign/", http.StripPrefix("/sign", s.sign.Routes()))
 
 	s.server = &http.Server{
-		Handler:           mux,
+		Handler:           securityHeaders(mux),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	go func() { _ = s.server.Serve(ln) }()
 	return nil
+}
+
+// securityHeaders 给所有响应补上安全头。
+//
+// 页面里的 token 走 URL，Referrer-Policy: no-referrer 能把
+// 「token 经 Referer 外泄」这条路直接拆掉；其余几项是常规加固。
+func securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("X-Frame-Options", "DENY")
+		next.ServeHTTP(w, r)
+	})
 }
 
 // URL 返回界面地址，带上访问 token。
@@ -179,12 +193,13 @@ func (s *Server) guard(next http.HandlerFunc) http.HandlerFunc {
 // tokenOK 接受两种带法。
 //
 // header 用于普通请求；query 是给 EventSource 留的，
-// 那个 API 不允许自定义请求头。
+// 那个 API 不允许自定义请求头。比较用常量时间。
 func (s *Server) tokenOK(r *http.Request) bool {
-	if r.Header.Get("X-Rog-Token") == s.token {
-		return true
+	t := r.Header.Get("X-Rog-Token")
+	if t == "" {
+		t = r.URL.Query().Get("token")
 	}
-	return r.URL.Query().Get("token") == s.token
+	return subtle.ConstantTimeCompare([]byte(t), []byte(s.token)) == 1
 }
 
 // SiteDir 返回默认站点目录。
@@ -257,6 +272,8 @@ func (s *Server) handleTaskNote(w http.ResponseWriter, r *http.Request, id strin
 		writeJSON(w, map[string]any{"ok": true})
 		return
 	}
+	// 换行符会造成日志伪造：一行能变成任意多行。
+	line = strings.NewReplacer("\r", " ", "\n", " ").Replace(line)
 	t.Logf("[页面] %s", line)
 	writeJSON(w, map[string]any{"ok": true})
 }
@@ -306,6 +323,8 @@ func (s *Server) streamTask(w http.ResponseWriter, r *http.Request, id string) {
 }
 
 // escapeSSE 把换行转义成字面量：SSE 的 data 字段里出现裸换行会截断消息。
+// \r 同样是 SSE 的行终止符，一并转义，否则日志行可以被伪造。
 func escapeSSE(s string) string {
+	s = strings.ReplaceAll(s, "\r", "\\r")
 	return strings.ReplaceAll(s, "\n", "\\n")
 }

@@ -293,12 +293,26 @@ func cmdPublishLocal(siteDir, destDir string) error {
 		return fmt.Errorf("%s 里没有可发布的文件", siteDir)
 	}
 
+	// 同一目标目录同时只允许一条发布：O_TRUNC 原地写时，
+	// 并发的两条发布会互相写半截文件。
+	release, err := publish.Acquire(site.Root, "local:"+destDir)
+	if err != nil {
+		return err
+	}
+	defer release()
+
 	target := &publish.Local{
 		Dir:  destDir,
 		Logf: func(format string, a ...any) { fmt.Printf("  "+format+"\n", a...) },
 	}
 
-	statePath := publish.StatePath(site.Root, target.Name(), destDir)
+	// 记录身份用规范化后的绝对路径："out" 与 "./out" 是同一个地方，
+	// 不该生成两份记录把增量复用白白丢掉。
+	destKey := destDir
+	if abs, absErr := filepath.Abs(destDir); absErr == nil {
+		destKey = abs
+	}
+	statePath := publish.StatePath(site.Root, target.Name(), destKey)
 	prev, err := publish.LoadRecord(statePath)
 	if err != nil {
 		// 记录损坏只意味着复用信息丢失，按首次发布处理即可。
@@ -655,6 +669,9 @@ func cmdPack(args []string) error {
 			i++
 			proxy = args[i]
 		default:
+			if strings.HasPrefix(args[i], "-") {
+				return fmt.Errorf("未知开关: %s（可选 --rebuild / --full / -r / --proxy）", args[i])
+			}
 			pos = append(pos, args[i])
 		}
 	}

@@ -1061,15 +1061,17 @@ func TestPublishRejectsWhenAlreadyRunning(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 先手动占住名额，模拟「已经有一条在跑」
-	release, err := publish.Acquire(abs, "local")
+	dest := t.TempDir()
+	// 先手动占住名额，模拟「已经有一条在跑」。锁名与请求一致：
+	// 本地发布按目标目录分键，同目录互斥、不同目录各跑各的。
+	release, err := publish.Acquire(abs, "local:"+dest)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer release()
 
 	code, out := postJSON(t, srv.baseURL()+"api/publish", map[string]any{
-		"site": site, "target": "local", "dest": t.TempDir(),
+		"site": site, "target": "local", "dest": dest,
 	})
 	if code != http.StatusOK {
 		t.Fatalf("建任务应当返回 200，实际 %d", code)
@@ -1493,6 +1495,27 @@ func TestPageHasIndependentRestorePanel(t *testing.T) {
 }
 
 // 恢复的目标目录要写明「必须为空」，并讲清不会替用户清空。
+// webui 只能操作启动时指定的站点目录：请求里换根等于 token 拿下全盘。
+func TestResolveSiteOnlyAllowsStartupDir(t *testing.T) {
+	site := t.TempDir()
+	s := New(site, 0)
+
+	if _, err := s.resolveSite("C:\\Windows"); err == nil {
+		t.Fatal("请求指定别的目录必须拒绝")
+	}
+	if _, err := s.resolveSite(filepath.Join(site, "..")); err == nil {
+		t.Fatal("换一个写法指向父目录也要拒绝")
+	}
+
+	got, err := s.resolveSite("")
+	if err != nil || got != site {
+		t.Fatalf("空参应回落到启动目录，实际 %q, %v", got, err)
+	}
+	if got, err := s.resolveSite(site); err != nil || got != site {
+		t.Fatalf("传启动目录本身应当放行，实际 %q, %v", got, err)
+	}
+}
+
 func TestPageRestoreExplainsEmptyDir(t *testing.T) {
 	if !strings.Contains(DefaultPage, "必须是空目录") {
 		t.Error("恢复面板应当写明目标目录必须为空")

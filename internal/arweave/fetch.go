@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	urlpkg "net/url"
 	"strings"
 
 	"github.com/LWDJD/read-only-git/internal/publish"
@@ -34,7 +35,7 @@ func FetchRecordWithClient(ctx context.Context, gateway, entry, relPath string, 
 		gateway = DefaultGateway
 	}
 
-	url := strings.TrimRight(gateway, "/") + "/" + entry + "/" + strings.TrimLeft(relPath, "/")
+	url := strings.TrimRight(gateway, "/") + "/" + urlpkg.PathEscape(strings.TrimLeft(entry, "/")) + "/" + escapeRelPath(relPath)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
@@ -49,6 +50,9 @@ func FetchRecordWithClient(ctx context.Context, gateway, entry, relPath string, 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 	if err != nil {
 		return nil, err
+	}
+	if len(body) >= 8<<20 {
+		return nil, fmt.Errorf("发布记录超过 8 MiB，拒绝解析")
 	}
 	if resp.StatusCode != http.StatusOK {
 		// 刚发布的 manifest 要等 bundle 落链后网关才解析得到。这里点明这一点，
@@ -70,4 +74,13 @@ func FetchRecordWithClient(ctx context.Context, gateway, entry, relPath string, 
 	// 链上那份的 Root 是空的（写它的时候入口 id 还不存在），这里补上调用方给的值。
 	rec.Root = entry
 	return &rec, nil
+}
+
+// escapeRelPath 把相对路径按段转义后拼回，防止 .. / ? # 之类改写请求路径。
+func escapeRelPath(rel string) string {
+	parts := strings.Split(strings.TrimLeft(rel, "/"), "/")
+	for i, p := range parts {
+		parts[i] = urlpkg.PathEscape(p)
+	}
+	return strings.Join(parts, "/")
 }

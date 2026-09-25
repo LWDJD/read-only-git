@@ -22,6 +22,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf16"
 )
@@ -171,13 +172,25 @@ func Pack(opt Options) (*Result, error) {
 		logf("> 完整重打包：忽略已有产物")
 	}
 
+	// 源住在目标里（或反过来）是自伤写法：全量分支先删目标，会把源一并删光。
+	// 实际踩过：rog pack out/demo out demo --rebuild 把源删了才报错。
+	if !remote {
+		if err := checkSourceTargetRelation(opt.Source, target); err != nil {
+			return nil, err
+		}
+	}
+
 	if err := os.MkdirAll(outRoot, 0o755); err != nil {
 		return nil, err
 	}
 
+	// 进程内互斥：清单读改写与代理设置都不允许交错。
+	packMu.Lock()
+	defer packMu.Unlock()
+
 	// 锁要罩住整个重建过程，包括下面的 RemoveAll：两个进程同时看到
 	// 不完整的目标再各自重建，会把对方的中间态当输入。
-	unlock, err := acquireLock(outRoot, name)
+	unlock, err := acquireLock(outRoot)
 	if err != nil {
 		return nil, err
 	}
@@ -200,7 +213,8 @@ func Pack(opt Options) (*Result, error) {
 
 	case remote:
 		logf("> 从远端克隆（远端源不做增量）")
-		if _, err := runGit("", "clone", "--bare", "--quiet", opt.Source, target); err != nil {
+		// -- 隔开选项与位置参数：源以 - 开头时不能被 git 当开关解析。
+		if _, err := runGit("", "clone", "--bare", "--quiet", "--", opt.Source, target); err != nil {
 			os.RemoveAll(target)
 			return nil, fmt.Errorf("%w\n  检查地址是否写对、网络是否可达。\n  私有仓库需要先让 git 自己拿到凭据", err)
 		}
@@ -262,8 +276,8 @@ func Pack(opt Options) (*Result, error) {
 
 // buildBare 把本地源仓库变成裸仓库，返回实际使用的链路。
 func buildBare(src, target string, logf func(string, ...any)) (string, error) {
-	// 首选 clone --bare
-	if _, err := runGit("", "clone", "--bare", "--quiet", src, target); err == nil {
+	// 首选 clone --bare。-- 隔开选项与位置参数。
+	if _, err := runGit("", "clone", "--bare", "--quiet", "--", src, target); err == nil {
 		return "clone", nil
 	}
 
@@ -357,7 +371,14 @@ func isBareRepo(path string) bool {
 //
 // 除了结构完整，还要过一遍 fsck 的连通性检查：refs 与文件都在、但 pack 数据
 // 已经损坏的目标如果被当成可用，增量会「成功」地留下一个拉不动的产物。
+//
+// 还有一条：目标不能是符号链接/junction。链接目标会被增量原地改写
+// （update-ref -d、prune 都落在链接指的地方），站点根里预置一个链接，
+// 就能把站点外的仓库当增量目标删 ref。误触发同样丢数据。
 func isUsableTarget(path string) bool {
+	if isSymlink(path) {
+		return false
+	}
 	if !isBareRepo(path) {
 		return false
 	}
@@ -365,6 +386,53 @@ func isUsableTarget(path string) bool {
 		return false
 	}
 	return true
+}
+
+// isSymlink 判断路径本身是不是符号链接（Windows 上 junction 也算）。
+//
+// 用 Lstat 而不是 Stat：Stat 会顺着链接看到目标去，分不出真假。
+func isSymlink(path string) bool {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return false
+	}
+	return info.Mode()&os.ModeSymlink != 0
+}
+
+// checkSourceTargetRelation 拒绝「源住在目标里」或「目标住在源里」的写法。
+//
+// 全量分支会先删目标；源若住在里面，源先没命。反过来目标住在源里时，
+// 打包的写入会落进源仓库的地盘。两种都是自伤，早点拦下来。
+func checkSourceTargetRelation(source, target string) error {
+	srcAbs, err := filepath.Abs(source)
+	if err != nil {
+		return err
+	}
+	tgtAbs, err := filepath.Abs(target)
+	if err != nil {
+		return err
+	}
+	srcAbs = filepath.Clean(srcAbs)
+	tgtAbs = filepath.Clean(tgtAbs)
+	if srcAbs == tgtAbs {
+		return fmt.Errorf("源仓库与输出目标是同一个目录: %s", srcAbs)
+	}
+	if isInside(srcAbs, tgtAbs) {
+		return fmt.Errorf("源仓库 %s 在输出目标 %s 里面：重建时会先把源删掉", srcAbs, tgtAbs)
+	}
+	if isInside(tgtAbs, srcAbs) {
+		return fmt.Errorf("输出目标 %s 在源仓库 %s 里面：打包产物会写进源仓库", tgtAbs, srcAbs)
+	}
+	return nil
+}
+
+// isInside 判断 child 是否在 parent 里面（不含自身）。
+func isInside(parent, child string) bool {
+	rel, err := filepath.Rel(parent, child)
+	if err != nil {
+		return false
+	}
+	return rel != "." && !strings.HasPrefix(rel, "..") && !filepath.IsAbs(rel)
 }
 
 // gitDirOf 解析出仓库实际的 git 目录：裸仓库返回自身，普通仓库返回其 .git。
@@ -700,20 +768,32 @@ func removeDirRetry(path string) error {
 	return err
 }
 
-// acquireLock 锁住「站点目录 + 仓库名」这个组合，防止两个进程同时写。
+// packMu 进程内全局互斥：pack 全程串行。
 //
-// 用操作系统级文件锁而不是「文件是否存在」判断占用：进程退出（包含被强杀）
-// 时由内核释放锁，不会留下需要人工清理的残留，也没有 PID 复用的误判。
-// 锁文件放在 .rog 下，它不属于站点内容，不会被发布。
-func acquireLock(outRoot, name string) (func(), error) {
+// 两件事靠它：repository.json 的读改写不能交错；gitProxy 是包级变量，
+// 并发 pack 时代理设置会串味。pack 是重 IO 操作，串行的代价小于出错的代价。
+// 它放在 Pack 层而不是 acquireLock 里：锁函数要能被同进程二次调用并如常失败。
+var packMu sync.Mutex
+
+// acquireLock 锁住一次 pack（跨进程）。
+//
+// 用操作系统级文件锁（落在 outRoot/.rog/pack.lock）：进程退出（含被强杀）
+// 时由内核释放锁，不会留下需要人工清理的残留。
+// 文件名不分仓库名：同一个站点根下的 pack 必须互斥，否则 repository.json
+// 的读改写会互相覆盖，丢失其他仓库的登记。
+func acquireLock(outRoot string) (func(), error) {
 	dir := filepath.Join(outRoot, stateDir)
+	// .rog 是符号链接时拒绝：锁与记录会落进链接指的地方，写入被静默重定向。
+	if isSymlink(dir) {
+		return nil, fmt.Errorf("%s 是符号链接，拒绝在其下写入", dir)
+	}
 	if info, err := os.Stat(dir); err == nil && !info.IsDir() {
 		return nil, fmt.Errorf("%s 已存在但不是目录，请先移除它", dir)
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
-	path := filepath.Join(dir, name+".lock")
+	path := filepath.Join(dir, "pack.lock")
 
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
@@ -721,7 +801,7 @@ func acquireLock(outRoot, name string) (func(), error) {
 	}
 	if err := lockFile(f); err != nil {
 		f.Close()
-		return nil, fmt.Errorf("已有另一个操作在写 %s（锁文件 %s）", name, path)
+		return nil, fmt.Errorf("已有另一个 pack 在写 %s（锁文件 %s）", outRoot, path)
 	}
 	// 刻意不删锁文件：删除会和另一个进程打开的句柄形成竞态，留着一个空文件无害。
 	return func() { _ = f.Close() }, nil
@@ -757,7 +837,13 @@ func NormalizeName(raw string) string {
 }
 
 // IsRemote 判断源是远端地址。Windows 路径如 D:\x 不匹配 scp 模式（没有 @）。
+//
+// 前导 - 的一律不当远端：那会把「源」变成 git 的选项（git clone --bare -x …），
+// 与当年 CVE-2017-1000117 同形。
 func IsRemote(source string) bool {
+	if strings.HasPrefix(source, "-") {
+		return false
+	}
 	return remoteURLRe.MatchString(source) || remoteSCPRe.MatchString(source)
 }
 
@@ -776,6 +862,7 @@ func RemoteName(url string) string {
 // windowsReservedNames 是 Windows 不允许作为文件名的保留名。
 var windowsReservedNames = map[string]bool{
 	"CON": true, "PRN": true, "AUX": true, "NUL": true,
+	"CONIN$": true, "CONOUT$": true,
 	"COM1": true, "COM2": true, "COM3": true, "COM4": true, "COM5": true,
 	"COM6": true, "COM7": true, "COM8": true, "COM9": true,
 	"LPT1": true, "LPT2": true, "LPT3": true, "LPT4": true, "LPT5": true,
@@ -788,6 +875,15 @@ var windowsReservedNames = map[string]bool{
 // unlinkat / cannot mkdir 这类看不出所以然的信息，报告里已经被点到过。
 func isValidName(name string) bool {
 	if name == "" || name == "." || name == ".." {
+		return false
+	}
+	// 前导 - 的名字会被 git 当开关解析，也不该出现在 URL 里
+	if strings.HasPrefix(name, "-") {
+		return false
+	}
+	// 尾随点与空格在 Win32 上会被静默剥掉："x." 与 "x" 指向同一目录，
+	// 两个名字会互相覆盖，锁文件却分成两把。一律拒绝。
+	if strings.HasSuffix(name, ".") || strings.HasSuffix(name, " ") {
 		return false
 	}
 	if strings.ContainsAny(name, `/\`) {
@@ -824,7 +920,12 @@ type registryEntry struct {
 
 func updateRegistry(outRoot, name string) error {
 	path := filepath.Join(outRoot, "repository.json")
-	entries := loadRegistry(path)
+	entries, err := loadRegistry(path)
+	if err != nil {
+		// 清单读不出来就中止，不能当空清单继续写——那会把其余仓库的
+		// 登记全部抹掉，只剩这一次的条目。损坏的清单要人来看一眼。
+		return err
+	}
 
 	description := ""
 	for _, e := range entries {
@@ -846,10 +947,10 @@ func updateRegistry(outRoot, name string) error {
 	return saveRegistry(path, kept)
 }
 
-func loadRegistry(path string) []registryEntry {
+func loadRegistry(path string) ([]registryEntry, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil
+		return nil, nil // 没有清单就是空的，这不是错误
 	}
 	var parsed struct {
 		Repositories []struct {
@@ -858,7 +959,7 @@ func loadRegistry(path string) []registryEntry {
 		} `json:"repositories"`
 	}
 	if err := json.Unmarshal(data, &parsed); err != nil {
-		return nil
+		return nil, fmt.Errorf("%s 解析失败: %w（修好它再打包，否则会丢失其他仓库的登记）", path, err)
 	}
 	out := make([]registryEntry, 0, len(parsed.Repositories))
 	for _, r := range parsed.Repositories {
@@ -867,10 +968,13 @@ func loadRegistry(path string) []registryEntry {
 		}
 		out = append(out, registryEntry{Name: r.Name, Description: r.Description})
 	}
-	return out
+	return out, nil
 }
 
 // saveRegistry 手写 JSON，保证 repositories 始终是数组、缩进稳定、中文不转义。
+//
+// 先写临时文件再改名：直接截断重写时被杀，会留下非法 JSON，
+// 下次读取失败连带把其余仓库的登记都丢了。
 func saveRegistry(path string, entries []registryEntry) error {
 	var b strings.Builder
 	b.WriteString("{\n  \"repositories\": [\n")
@@ -882,7 +986,11 @@ func saveRegistry(path string, entries []registryEntry) error {
 			jsonString(e.Name), jsonString(e.Description))
 	}
 	b.WriteString("\n  ]\n}\n")
-	return os.WriteFile(path, []byte(b.String()), 0o644)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(b.String()), 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
 // jsonString 序列化字符串，但不转义 < > &（便于人工阅读）。

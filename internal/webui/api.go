@@ -40,12 +40,20 @@ func decodeBody(w http.ResponseWriter, r *http.Request, into any) bool {
 		writeErr(w, http.StatusMethodNotAllowed, fmt.Errorf("这个接口只接受 POST"))
 		return false
 	}
+	// 请求体上限：单请求不该能喂爆进程内存（文件替换的大请求也够用）。
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBytes)
 	if err := json.NewDecoder(r.Body).Decode(into); err != nil {
 		writeErr(w, http.StatusBadRequest, fmt.Errorf("请求体不是合法 JSON: %w", err))
 		return false
 	}
 	return true
 }
+
+// maxRequestBytes 是请求体上限（256 MiB）。
+//
+// 定高不为防什么攻击，只为拦住失控的客户端与损坏的请求：
+// 文件替换接口一次可能带很多 base64 文件，但也不会到这个量级。
+const maxRequestBytes = 256 << 20
 
 // safeJoin 把相对路径拼到站点根下，并挡住越界写法。
 //
@@ -79,6 +87,22 @@ func siteOf(s *Server, given string) string {
 		return given
 	}
 	return s.siteDir
+}
+
+// resolveSite 解析要操作的站点目录。
+//
+// 只认启动时 --site 指定的那一个：请求里带别的目录一律拒绝。
+// 曾经 given 原样当根目录，等于「token → 全盘读写删」（测试报告 A1）；
+// 设计承诺是 token 只能改站点文件，这里把承诺变成事实。
+func (s *Server) resolveSite(given string) (string, error) {
+	given = strings.TrimSpace(given)
+	if given == "" {
+		return s.siteDir, nil
+	}
+	if sameFile(given, s.siteDir) {
+		return s.siteDir, nil
+	}
+	return "", fmt.Errorf("只能操作启动时指定的站点目录 %s，不能换别的目录", s.siteDir)
 }
 
 // ---------- 状态 ----------
@@ -138,7 +162,11 @@ type stateResponse struct {
 }
 
 func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
-	site := siteOf(s, r.URL.Query().Get("site"))
+	site, err := s.resolveSite(r.URL.Query().Get("site"))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
 	writeJSON(w, s.buildState(site))
 }
 
@@ -352,7 +380,12 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &req) {
 		return
 	}
-	req.Site = siteOf(s, req.Site)
+	resolved, err := s.resolveSite(req.Site)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	req.Site = resolved
 	if strings.TrimSpace(req.Site) == "" {
 		writeErr(w, http.StatusBadRequest, fmt.Errorf("站点目录不能为空"))
 		return
@@ -378,8 +411,13 @@ func (s *Server) doPublish(t *Task, req publishRequest) error {
 
 	// 同一站点同一目标同时只允许一条发布在跑。
 	// 连点两下按钮就会撞到这里，与其两条发布互踩同一份记录，
-	// 不如直接把后一条拒掉，并告诉她原因。
-	release, err := publish.Acquire(site.Root, req.Target)
+	// 不如直接把后一条拒掉，并告诉她原因。本地目标按目录分键：
+	// 发到两个不同目录的两条发布不该互相挡。
+	lockName := req.Target
+	if req.Target == "local" {
+		lockName = "local:" + req.Dest
+	}
+	release, err := publish.Acquire(site.Root, lockName)
 	if err != nil {
 		return err
 	}
@@ -405,7 +443,13 @@ func (s *Server) publishLocal(t *Task, site *publish.Site, req publishRequest) e
 	}
 
 	target := &publish.Local{Dir: req.Dest, Logf: t.Logf}
-	statePath := publish.StatePath(site.Root, target.Name(), req.Dest)
+	// 记录身份用规范化后的绝对路径："out" 与 "./out" 是同一个地方，
+	// 不该生成两份记录把增量复用白白丢掉。
+	destKey := req.Dest
+	if abs, err := filepath.Abs(req.Dest); err == nil {
+		destKey = abs
+	}
+	statePath := publish.StatePath(site.Root, target.Name(), destKey)
 
 	prev, err := publish.LoadRecord(statePath)
 	if err != nil {
@@ -536,7 +580,12 @@ func (s *Server) handleSiteInit(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &req) {
 		return
 	}
-	req.Site = siteOf(s, req.Site)
+	resolved, err := s.resolveSite(req.Site)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	req.Site = resolved
 	if strings.TrimSpace(req.Site) == "" {
 		writeErr(w, http.StatusBadRequest, fmt.Errorf("站点目录不能为空"))
 		return
@@ -688,7 +737,11 @@ func (s *Server) handleFileReplace(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &req) {
 		return
 	}
-	site := siteOf(s, req.Site)
+	site, err := s.resolveSite(req.Site)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
 	if len(req.Files) == 0 {
 		writeErr(w, http.StatusBadRequest, fmt.Errorf("没有要写入的文件"))
 		return
@@ -712,6 +765,10 @@ func (s *Server) writeSiteFile(site, rel string, data []byte) error {
 	if err != nil {
 		return err
 	}
+	// 已是符号链接时拒绝：WriteFile 会顺着链接写到站点外去
+	if info, lerr := os.Lstat(full); lerr == nil && info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s 是符号链接，拒绝覆盖", rel)
+	}
 	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
 		return err
 	}
@@ -732,7 +789,11 @@ func (s *Server) handleFileDelete(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &req) {
 		return
 	}
-	site := siteOf(s, req.Site)
+	site, err := s.resolveSite(req.Site)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
 
 	full, err := safeJoin(site, req.Path)
 	if err != nil {
@@ -795,7 +856,11 @@ func (s *Server) handleFileCopy(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &req) {
 		return
 	}
-	site := siteOf(s, req.Site)
+	site, err := s.resolveSite(req.Site)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
 	if len(req.From) == 0 {
 		writeErr(w, http.StatusBadRequest, fmt.Errorf("没有指定要复制的东西"))
 		return
@@ -862,10 +927,26 @@ func inside(parent, child string) bool {
 }
 
 // copyTree 递归复制文件或目录。
+//
+// 用 Lstat 不跟随符号链接：链接条目一律拒绝，否则站点里预置一个
+// 指向外部的链接就能把外面的整棵树拉进来；指向祖先的链接还会
+// 让递归转不出去。深度上限是第二道保险。
 func copyTree(src, dst string) error {
-	info, err := os.Stat(src)
+	return copyTreeAt(src, dst, 0)
+}
+
+const copyTreeMaxDepth = 32
+
+func copyTreeAt(src, dst string, depth int) error {
+	if depth > copyTreeMaxDepth {
+		return fmt.Errorf("目录层级超过 %d 层，中止复制", copyTreeMaxDepth)
+	}
+	info, err := os.Lstat(src)
 	if err != nil {
 		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s 是符号链接，跳过不复制", src)
 	}
 
 	if !info.IsDir() {
@@ -883,7 +964,7 @@ func copyTree(src, dst string) error {
 		return err
 	}
 	for _, e := range entries {
-		if err := copyTree(filepath.Join(src, e.Name()), filepath.Join(dst, e.Name())); err != nil {
+		if err := copyTreeAt(filepath.Join(src, e.Name()), filepath.Join(dst, e.Name()), depth+1); err != nil {
 			return err
 		}
 	}
@@ -891,6 +972,10 @@ func copyTree(src, dst string) error {
 }
 
 func copyFile(src, dst string, mode os.FileMode) error {
+	// dst 已是符号链接时拒绝：顺着链接写就是站点外覆盖
+	if info, err := os.Lstat(dst); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("目标已是符号链接，拒绝覆盖: %s", dst)
+	}
 	in, err := os.Open(src)
 	if err != nil {
 		return err
@@ -920,7 +1005,11 @@ func (s *Server) handleFileMkdir(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &req) {
 		return
 	}
-	site := siteOf(s, req.Site)
+	site, err := s.resolveSite(req.Site)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
 
 	full, err := safeJoin(site, req.Path)
 	if err != nil {

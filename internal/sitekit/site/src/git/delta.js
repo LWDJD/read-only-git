@@ -1,5 +1,9 @@
 import { readVarint } from './util.js'
 
+// delta 声明的输出大小上限。git 对象极少超过这个量级（GitHub 上限 100MB），
+// 而恶意 delta 会声明 2^30 甚至 2^32-1 来骗分配（测试报告 A2-2）。
+const MAX_DELTA_RESULT = 512 * 1024 * 1024
+
 /**
  * 应用 git delta 指令。
  *
@@ -20,6 +24,9 @@ export function applyDelta(base, delta) {
 
   r = readVarint(delta, r.next)
   const resultSize = r.value
+  if (resultSize > MAX_DELTA_RESULT) {
+    throw new Error(`delta 声明的输出大小 ${resultSize} 超过上限 ${MAX_DELTA_RESULT}，拒绝分配`)
+  }
   let pos = r.next
 
   const out = new Uint8Array(resultSize)
@@ -43,11 +50,17 @@ export function applyDelta(base, delta) {
       if (copyOffset + copySize > base.length) {
         throw new Error('delta copy ran past the end of the base object')
       }
+      if (outPos + copySize > resultSize) {
+        throw new Error('delta 产出超出声明大小')
+      }
       out.set(base.subarray(copyOffset, copyOffset + copySize), outPos)
       outPos += copySize
     } else if (cmd > 0) {
       if (pos + cmd > delta.length) {
         throw new Error('delta insert ran off the end')
+      }
+      if (outPos + cmd > resultSize) {
+        throw new Error('delta 产出超出声明大小')
       }
       out.set(delta.subarray(pos, pos + cmd), outPos)
       outPos += cmd
