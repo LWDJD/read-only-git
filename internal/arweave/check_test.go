@@ -37,8 +37,8 @@ func testRecord() *publish.Record {
 
 const testManifest = `{"manifest":"arweave/paths","version":"0.2.0","paths":{"a.txt":{"id":"id-a"},"b.txt":{"id":"id-b"}}}`
 
-// 两个网关、只有一边有 b.txt：b 该判 partial（疑似索引未完成），不是 missing。
-func TestCheckSiteDistinguishesPartialFromMissing(t *testing.T) {
+// 一个网关读到就算成功：网关差异只作备注，不把成功标成可疑。
+func TestCheckSiteOneGatewayIsEnough(t *testing.T) {
 	gw1 := checkGateway(map[string][]byte{
 		"root-id": []byte(testManifest),
 		"id-a":    []byte("aaa"),
@@ -61,15 +61,19 @@ func TestCheckSiteDistinguishesPartialFromMissing(t *testing.T) {
 	if !rep.EntryOK {
 		t.Fatalf("入口应当可读: %s", rep.EntryMsg)
 	}
-	byPath := map[string]Verdict{}
 	for _, it := range rep.Items {
-		byPath[it.Path] = it.Verdict
+		if it.Verdict != VerdictOK {
+			t.Fatalf("%s 有一个网关读到就该 ok，实际 %s", it.Path, it.Verdict)
+		}
 	}
-	if byPath["a.txt"] != VerdictOK {
-		t.Fatalf("a.txt 两边都有，应当 ok，实际 %s", byPath["a.txt"])
+	// b.txt 的网关差异应当记在 detail 里（不影响结论）
+	for _, it := range rep.Items {
+		if it.Path == "b.txt" && it.Detail == "" {
+			t.Fatal("网关差异应当记进 detail")
+		}
 	}
-	if byPath["b.txt"] != VerdictPartial {
-		t.Fatalf("b.txt 只有一边有，应当 partial，实际 %s", byPath["b.txt"])
+	if rep.GatewayDiff == 0 {
+		t.Fatal("b.txt 有网关差异，GatewayDiff 应当计到")
 	}
 }
 
@@ -150,10 +154,10 @@ func TestRepairClearsOnlyBadRefs(t *testing.T) {
 		t.Fatalf("mismatch 也该清，实际清了 %d", n)
 	}
 
-	// partial 不清：那是索引问题，清了会让已付费的内容重传
+	// unreachable 不清：那是网络问题，清了会让已付费的内容重传
 	rec3 := testRecord()
-	rep3 := &CheckReport{Items: []ItemCheck{{Path: "a.txt", Verdict: VerdictPartial}}}
+	rep3 := &CheckReport{Items: []ItemCheck{{Path: "a.txt", Verdict: VerdictUnreachable}}}
 	if n := RepairRecord(rec3, rep3); n != 0 {
-		t.Fatalf("partial 不该清，实际清了 %d", n)
+		t.Fatalf("unreachable 不该清，实际清了 %d", n)
 	}
 }

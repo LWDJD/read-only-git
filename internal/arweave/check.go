@@ -29,12 +29,13 @@ type Verdict string
 
 const (
 	// VerdictOK 可读（开了摘要核对时内容也一致）。
+	//
+	// 一个网关读到就算：Arweave 上数据在链上即永久，个别网关读不到
+	// 只是那一个网关的索引问题，不影响「上传成功」这个事实。
 	VerdictOK Verdict = "ok"
 	// VerdictMissing 能问到的网关都说 404：链上大概率真缺。
 	VerdictMissing Verdict = "missing"
-	// VerdictPartial 部分网关读不到：更像索引没完成或网关差异，先别急着补。
-	VerdictPartial Verdict = "partial"
-	// VerdictMismatch 可读但内容摘要与记录不符：内容被换过或网关回了别的东西。
+	// VerdictMismatch 读到了，但内容摘要全都与记录不符：内容真有问题。
 	VerdictMismatch Verdict = "mismatch"
 	// VerdictUnreachable 网关都连不上，问不出结论。
 	//
@@ -74,9 +75,11 @@ type CheckReport struct {
 
 	OK          int
 	Missing     int
-	Partial     int
 	Mismatch    int
 	Unreachable int
+	// GatewayDiff 是 OK 里那些各网关表现不一致的条数（有的读不到、
+	// 或有的内容怪），只作备注，不影响结论。
+	GatewayDiff int
 
 	// Repaired 是 repair 清掉了多少条坏引用。
 	Repaired int
@@ -204,10 +207,11 @@ func CheckSite(ctx context.Context, opt CheckOptions) (*CheckReport, error) {
 			switch item.Verdict {
 			case VerdictOK:
 				rep.OK++
+				if item.Detail != "" {
+					rep.GatewayDiff++
+				}
 			case VerdictMissing:
 				rep.Missing++
-			case VerdictPartial:
-				rep.Partial++
 			case VerdictMismatch:
 				rep.Mismatch++
 			case VerdictUnreachable:
@@ -325,11 +329,15 @@ func fetchDigest(ctx context.Context, client *http.Client, gateway, id string, c
 }
 
 // judgeItem 把各网关的回答聚成一条结论。
+//
+// 判定口径：一个网关读到且内容对就算成功。Arweave 上数据在链上即永久，
+// 别的网关读不到、或回了怪东西，都是那一个网关自己的问题，
+// 不能反过来把成功标成可疑——那只会让人白担心。
 func judgeItem(item ItemCheck, wantDigest string, checkContent bool) (Verdict, string) {
-	okCount := 0
+	okGood := 0 // 读到且内容对
+	okBad := 0  // 读到但内容不对
 	reachable := 0
-	missingCount := 0
-	mismatch := false
+	missing := 0
 	var netErrs []string
 
 	for _, g := range item.Per {
@@ -339,27 +347,31 @@ func judgeItem(item ItemCheck, wantDigest string, checkContent bool) (Verdict, s
 		}
 		reachable++
 		if !g.OK {
-			missingCount++
+			missing++
 			continue
 		}
-		okCount++
 		if checkContent && wantDigest != "" && g.Digest != wantDigest {
-			mismatch = true
+			okBad++
+		} else {
+			okGood++
 		}
 	}
 
 	switch {
 	case reachable == 0:
 		return VerdictUnreachable, "网关都连不上，无法判断：" + strings.Join(netErrs, "; ")
-	case okCount == 0:
-		// 能问到的网关都说 404：这才叫 missing
-		return VerdictMissing, fmt.Sprintf("%d 个网关都说不存在", missingCount)
-	case mismatch:
-		return VerdictMismatch, "内容摘要与记录不符"
-	case okCount < reachable:
-		return VerdictPartial, fmt.Sprintf("%d/%d 个网关读到", okCount, reachable)
+	case okGood+okBad == 0:
+		return VerdictMissing, fmt.Sprintf("%d 个网关都说不存在", missing)
+	case okGood > 0:
+		// 至少一份读到且内容对：链上就是好的。网关差异只作备注。
+		detail := ""
+		if okBad > 0 || missing > 0 {
+			detail = fmt.Sprintf("%d/%d 个网关正常", okGood, len(item.Per))
+		}
+		return VerdictOK, detail
 	default:
-		return VerdictOK, ""
+		// 读到的都对不上：内容真有问题
+		return VerdictMismatch, "读到的网关内容摘要都与记录不符"
 	}
 }
 

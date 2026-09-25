@@ -706,8 +706,8 @@ func cmdVerify(args []string) error {
 	}
 
 	fmt.Println()
-	fmt.Printf("v 汇总：可读 %d、疑似索引未完成 %d、查不到 %d、摘要不符 %d、网关不可达 %d（用时 %s）\n",
-		report.OK, report.Partial, report.Missing, report.Mismatch, report.Unreachable,
+	fmt.Printf("v 汇总：可读 %d（其中 %d 条网关有差异）、查不到 %d、摘要不符 %d、网关不可达 %d（用时 %s）\n",
+		report.OK, report.GatewayDiff, report.Missing, report.Mismatch, report.Unreachable,
 		report.Duration.Round(time.Millisecond))
 
 	if repair {
