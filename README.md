@@ -92,7 +92,7 @@ rog pack [--update] <源仓库> [输出目录] [仓库名]
 | `<源仓库>` | 是 | | 本地路径（普通仓库或裸仓库），或远端地址 |
 | `[输出目录]` | 否 | `public` | 站点根目录，也就是放着 `index.html` 的那个 |
 | `[仓库名]` | 否 | 本地取目录名，远端取地址末段 | 对外标识，带不带 `.git` 后缀等价 |
-| `--update` | 否 | 关 | 目标已存在时做增量更新，保留旧 pack |
+| `--rebuild` | 否 | 关 | 忽略已有产物从零重建；默认自动（目标里已有能用的仓库就增量） |
 
 ```bash
 # 本地仓库
@@ -104,8 +104,11 @@ rog pack https://github.com/LWDJD/p2ping.git
 # 指定输出目录和名字
 rog pack git@github.com:LWDJD/p2ping.git site p2ping
 
-# 已有站点上增量更新，只处理变化的对象
-rog pack --update ../p2ping site p2ping
+# 已有站点上再跑一次：自动增量，只处理变化的对象（不需要任何开关）
+rog pack ../p2ping site p2ping
+
+# 忽略已有产物，从零重建
+rog pack --rebuild ../p2ping site p2ping
 ```
 
 尖括号是必填，方括号是可省略。
@@ -137,7 +140,10 @@ rog pack --update ../p2ping site p2ping
 
 裸仓库输出到 `<输出目录>/<仓库名>/` → `repack -a -d` 把对象收进单 pack → `gc --prune=now` → `update-server-info` 生成索引 → 清掉协议用不到的文件 → 校验并打印清单 → 更新 `repository.json`。
 
-重复执行安全：同名仓库覆盖重建，`repository.json` 里那条的 `description` 会保留。增量模式下旧 pack 保持不动，只把新对象追加进去，refs 对齐到源仓库。
+重复执行安全：默认自动增量——目标里已有能用的仓库就只传变化的对象，
+`--rebuild` 才忽略旧产物从零重建。增量模式下旧 pack 保持不动，
+只把新对象追加进去，refs 对齐到源仓库。仓库名带尾随点/空格、前导 `-`
+或 Windows 设备名（CON 之类）会被直接拒绝，免得两个名字指向同一目录互相覆盖。
 
 产物就七个文件：
 
@@ -326,6 +332,23 @@ node scripts/selftest.mjs <裸仓库目录>     # 或指定一个现成的
 
 `public/` 是**产物目录**：骨架、裸仓库、清单都由工具生成，不进版本库。
 要看效果就跑 `rog site init` 铺一份出来。
+
+## 信任模型
+
+这个工具是单人管理员工具，安全边界按「你信任谁」来看：
+
+- **webui 与签名服务的 token 就是管理员权限**。持 token 者可改站点文件、
+  发起发布与交易。两个服务都只绑 `127.0.0.1`，token 每次启动随机生成，
+  不要外传地址栏里的那串 token。
+- **`--from`、`--gateway`、`--endpoint`、`--node` 是信任决策**。
+  入口 id 指向谁、网关指向谁，增量复用与恢复就信谁返回的内容。
+  Arweave 的 id 是签名哈希不是内容哈希，工具无法按 id 反验内容；
+  恶意网关可以返回任意字节。只用你信得过的入口与网关。
+- **不要 pack 不可信来源的仓库**。`file://` 源会在源仓库自己的 git 配置下
+  运行 `git-upload-pack`，恶意仓库可在配置里指 `uploadpack.packObjectsHook`
+  之类触发命令。把不可信仓库当数据看这个前提，被 git 自己的语义打破了。
+- 前端解析器对恶意 pack 做了防御（delta 环、声明大小、解压膨胀都有上限），
+  打挂标签页这类事不会再发生；但解析器不会替你判断仓库内容是否可信。
 
 ## 已知限制
 
