@@ -1492,11 +1492,6 @@ func TestPageHasIndependentRestorePanel(t *testing.T) {
 	if strings.Contains(DefaultPage, "从链上恢复的入口") {
 		t.Error("发布面板里不该再有从链上恢复的入口：它已经独立成块")
 	}
-	// pubFrom 是「增量基准」：取发布记录续增量，只影响复用判断，
-	// 与把站点内容取回来的恢复面板是两件事，各有各的门。
-	if !strings.Contains(DefaultPage, "增量基准") {
-		t.Error("发布面板应当提供增量基准（换机器或恢复后续增量）")
-	}
 }
 
 // 恢复的目标目录要写明「必须为空」，并讲清不会替用户清空。

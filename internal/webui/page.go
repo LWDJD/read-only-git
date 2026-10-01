@@ -282,9 +282,7 @@ const DefaultPage = `<!doctype html>
         </datalist>
         <p class="muted" style="margin:0">交易先交给网关、再由它转给节点，这一跳不通就会「看似成功、实则没到场」。上面这几个都是能应答的，也可以用 <code>rog nodes</code> 现场探一下哪个快。</p>
       </div>
-      <label>增量基准（可选）：上次发布的入口 id。换机器、本地记录丢了、或从链上恢复过站点时填它，就能续上增量，只传变化的文件。</label>
-      <input id="pubFrom" placeholder="留空用本地记录">
-      <p class="muted" style="margin:0">仓库名取站点目录名，不用填。</p>
+      <p class="muted" style="margin:0">仓库名取站点目录名，不用填。增量靠 .rog/ 里的发布记录自动续上。</p>
       <button class="primary" id="doPublish">开始发布</button>
     </section>
 
@@ -1430,7 +1428,6 @@ const DefaultPage = `<!doctype html>
       dest: el('pubDest').value.trim(),
       endpoint: el('pubEndpoint').value.trim(),
       node: el('pubNode').value.trim(),
-      from: el('pubFrom').value.trim(),
       proxyMode: el('pubProxyMode').value,
       proxyUrl: el('pubProxyUrl').value.trim(),
     }, '发布到 ' + activeTarget, {

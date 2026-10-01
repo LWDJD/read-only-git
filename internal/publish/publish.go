@@ -181,6 +181,48 @@ func StatePath(siteRoot, target, identity string) string {
 	return filepath.Join(siteRoot, StateDir, recordFileName(target, identity))
 }
 
+// FindStatePath 找这次发布该用的记录文件。
+//
+// 精确名字（target + identity 的哈希）在就用它；不在就扫
+// .rog/publish-<target>-*.json 取最新的那份。为什么需要扫描：记录文件名里
+// 的身份哈希跟着站点目录名走，站点从链上恢复到别的目录、或改过名之后，
+// 哈希就对不上了——但那份记录就是这个站点的账本，它一直躺在 .rog/ 里
+// （记录是站点内容的一部分，会随站点一起恢复回来）。找不到时返回标准名，
+// 首次发布会往那里写。
+func FindStatePath(siteRoot, target, identity string) string {
+	exact := StatePath(siteRoot, target, identity)
+	if _, err := os.Stat(exact); err == nil {
+		return exact
+	}
+
+	dir := filepath.Join(siteRoot, StateDir)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return exact
+	}
+	prefix := "publish-" + target + "-"
+	var newest string
+	var newestMod time.Time
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		if newest == "" || info.ModTime().After(newestMod) {
+			newest = name
+			newestMod = info.ModTime()
+		}
+	}
+	if newest != "" {
+		return filepath.Join(dir, newest)
+	}
+	return exact
+}
+
 // PendingPath 返回「已签名未提交的交易」在本地磁盘上的路径。
 //
 // 与发布记录同一套命名规则，只是前缀不同：同样按「站点 + 目标 + 身份」

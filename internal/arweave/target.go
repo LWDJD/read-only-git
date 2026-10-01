@@ -73,9 +73,10 @@ func (t *Target) Publish(ctx context.Context, site *publish.Site, prev *publish.
 		At:     time.Now(),
 	}
 
-	// 影响 tags 的参数变了，旧引用就不能再用：内容未变的文件如果照旧复用，
-	// 会连同旧的 Repo 标签一起沿用下去，产物里就出现了两种标签共存。
-	labelsMatch := prev != nil && prev.Labels["repo"] == t.Repo
+	// 复用不看 repo 标签：站点从链上恢复到别的目录、或改过名之后，
+	// 目录名（也就是 repo）会变，但内容还是那个内容，旧 id 取回的字节
+	// 一个不差。标签里 Repo 值陈旧是已接受的取舍（与跨路径去重同理）：
+	// manifest 才是寻址真相。拦住复用只会让人为同一份内容再付一次钱。
 
 	// L1 模式下这一轮新签的 data item 先攒着，最后打成一包只发一笔交易。
 	// Turbo 模式下每签完一个就直接交给上传服务，攒的东西始终为空。
@@ -137,11 +138,11 @@ func (t *Target) Publish(ctx context.Context, site *publish.Site, prev *publish.
 	// （改名、挪目录）就会被当新文件重签重传。id 是内容寻址的
 	// （签名就是内容哈希），同内容的旧 id 取回的就是这份字节。
 	//
-	// 取舍：被复用的那个 item 里 Path 标签停在首次上传时的路径，
-	// 与新路径不一致。manifest 才是寻址真相，标签只是元数据，
+	// 取舍：被复用的那个 item 里 Path / Repo 标签停在首次上传时的值，
+	// 与现状不一致。manifest 才是寻址真相，标签只是元数据，
 	// 拿它换真金白银的字节是划算的。
 	dedup := make(map[string]string, len(site.Files))
-	if labelsMatch {
+	if prev != nil {
 		for p, id := range prev.Refs {
 			d := prev.Files[p]
 			if d != "" && id != "" {
@@ -158,7 +159,7 @@ func (t *Target) Publish(ctx context.Context, site *publish.Site, prev *publish.
 		}
 
 		// 摘要与上次一致、且上次确实拿到了 id：直接沿用，不重传。
-		if labelsMatch {
+		if prev != nil {
 			oldID := prev.Refs[f.Path]
 			if oldID != "" && prev.Files[f.Path] == f.Digest {
 				rec.Files[f.Path] = f.Digest

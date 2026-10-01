@@ -381,7 +381,9 @@ func TestPublishDedupesWithinRun(t *testing.T) {
 	}
 }
 
-func TestPublishDoesNotReuseWhenLabelsChange(t *testing.T) {
+// 换 repo 名（目录改名、从链上恢复到别的目录）后内容没变就该复用：
+// 旧 id 取回的字节一个不差，标签里 Repo 值陈旧是已接受的取舍。
+func TestPublishReusesAcrossRepoRename(t *testing.T) {
 	site := writeSite(t, map[string]string{"a.txt": "same"})
 
 	first := &Target{Repo: "old-name", Uploader: nil, Signer: &stubSigner{}}
@@ -400,12 +402,12 @@ func TestPublishDoesNotReuseWhenLabelsChange(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if rec2.Refs["a.txt"] == rec1.Refs["a.txt"] {
-		t.Fatal("标签变了就不该复用旧引用")
+	if rec2.Refs["a.txt"] != rec1.Refs["a.txt"] {
+		t.Fatal("内容没变就该复用旧引用，repo 名改了也一样")
 	}
-	// 文件 + manifest 都要重传
-	if count2() != 2 {
-		t.Fatalf("标签变化后应全量重传，实际 %d 次", count2())
+	// 只有 manifest 要重传
+	if count2() != 1 {
+		t.Fatalf("只该重传 manifest，实际 %d 次", count2())
 	}
 	if rec2.Labels["repo"] != "new-name" {
 		t.Fatalf("记录应带上新的标签: %+v", rec2.Labels)

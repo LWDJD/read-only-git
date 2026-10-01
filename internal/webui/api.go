@@ -495,7 +495,8 @@ func (s *Server) publishArweave(t *Task, site *publish.Site, req publishRequest,
 	// 同时也不再往日志里打一个「签名页 <地址>」——那个地址现在不存在了。
 	svc := s.sign
 
-	statePath := publish.StatePath(site.Root, "arweave", repo)
+	// 记录认 .rog/ 里已有的那份（换目录/恢复后文件名哈希会对不上，账本却一直在）。
+	statePath := publish.FindStatePath(site.Root, "arweave", repo)
 	prev, err := publish.LoadRecord(statePath)
 	if err != nil {
 		t.Logf("! %v（按首次发布处理）", err)
@@ -628,7 +629,7 @@ func (s *Server) doVerify(w http.ResponseWriter, r *http.Request, repair bool) {
 	}
 
 	id := s.tasks.Run("verify", func(t *Task) {
-		statePath := publish.StatePath(site, "arweave", repo)
+		statePath := publish.FindStatePath(site, "arweave", repo)
 		var rec *publish.Record
 		if req.From != "" {
 			rec, err = arweave.FetchRecordWithClient(t.ctx, gateways[0], req.From,
