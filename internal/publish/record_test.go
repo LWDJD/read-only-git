@@ -2,10 +2,45 @@ package publish
 
 import (
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// 记录要能被找到：精确名对不上时（换目录、从链上恢复后身份哈希漂移），
+// 扫 .rog/ 里已有的那份——账本一直躺在那里，别重建它。
+func TestFindStatePathFallsBackToExistingFile(t *testing.T) {
+	root := t.TempDir()
+	rog := filepath.Join(root, StateDir)
+	if err := os.MkdirAll(rog, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	restored := filepath.Join(rog, "publish-arweave-ffffffff.json")
+	if err := os.WriteFile(restored, []byte(`{"target":"arweave","files":{},"refs":{}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := FindStatePath(root, "arweave", "totally-different-name"); got != restored {
+		t.Fatalf("应当找到恢复来的记录，实际 %q", got)
+	}
+
+	// 精确名在时用精确名
+	exact := StatePath(root, "arweave", "mine")
+	if err := os.WriteFile(exact, []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := FindStatePath(root, "arweave", "mine"); got != exact {
+		t.Fatalf("精确名存在时应当用它，实际 %q", got)
+	}
+
+	// 都没有时给标准名（首次发布会往那里写）。用干净目录：
+	// 上面写过的记录就该被扫到，那是设计意图，不是干扰。
+	fresh := t.TempDir()
+	if got := FindStatePath(fresh, "arweave", "fresh"); got != StatePath(fresh, "arweave", "fresh") {
+		t.Fatalf("无记录时应当给标准名，实际 %q", got)
+	}
+}
 
 // 站点内相对路径与本地绝对路径必须指向同一个文件，
 // 否则「上链的是这个、本地读的是那个」会悄悄错开。

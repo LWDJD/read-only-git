@@ -282,7 +282,7 @@ const DefaultPage = `<!doctype html>
         </datalist>
         <p class="muted" style="margin:0">交易先交给网关、再由它转给节点，这一跳不通就会「看似成功、实则没到场」。上面这几个都是能应答的，也可以用 <code>rog nodes</code> 现场探一下哪个快。</p>
       </div>
-      <p class="muted" style="margin:0">仓库名取站点目录名，不用填。</p>
+      <p class="muted" style="margin:0">仓库名取站点目录名，不用填。增量靠 .rog/ 里的发布记录自动续上。</p>
       <button class="primary" id="doPublish">开始发布</button>
     </section>
 
@@ -693,6 +693,12 @@ const DefaultPage = `<!doctype html>
         await api('/sign/api/sign/' + task.id, { method: 'POST', body: signed });
       } catch (e) {
         note('签名失败：' + (e && e.message ? e.message : String(e)), 'err');
+        // 签名通道断了，后端会一直等签名等到超时：发布锁占着、按钮灰着。
+        // 直接取消任务，让一切当场恢复，重试干净。
+        if (currentTaskId) {
+          api('/api/task/' + currentTaskId + '/cancel', { method: 'POST' }).catch(function () {});
+        }
+        setBusy(false);
         return;
       }
 

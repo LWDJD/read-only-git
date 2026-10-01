@@ -407,9 +407,9 @@ func cmdPublishArweave(siteDir, repo, endpoint, fromEntry, gateway string, useL1
 	}
 
 	uploader := arweave.NewUploaderWithClient(endpoint, client)
-	// 记录身份用仓库名而不是上传端点：data item id 是内容寻址的，
-	// 换一个端点，同一份内容仍然是同一个 id，用端点分键只会白白重传一遍。
-	statePath := publish.StatePath(site.Root, "arweave", repo)
+	// 记录用仓库名归档，但找它时认 .rog/ 里已有的那份：
+	// 换机器、从链上恢复到别的目录后，文件名哈希会对不上，账本却一直在。
+	statePath := publish.FindStatePath(site.Root, "arweave", repo)
 
 	prev, err := publish.LoadRecord(statePath)
 	if err != nil {
