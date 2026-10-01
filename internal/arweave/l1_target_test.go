@@ -298,10 +298,11 @@ func TestL1PublishRejectsOversizeWithoutProofs(t *testing.T) {
 // 交易先报（不带 data），内容再逐块补。
 func TestL1PublishChunksLargeBundle(t *testing.T) {
 	big := strings.Repeat("A", 200*1024)
+	bigB := strings.Repeat("B", 200*1024) // 与 a.bin 内容不同：相同会被去重压成一份，bundle 就不够大了
 	site := writeSite(t, map[string]string{
 		"index.html": "<h1>hi</h1>",
 		"a.bin":      big,
-		"b.bin":      big,
+		"b.bin":      bigB,
 	})
 
 	node := &chunkNode{}
