@@ -1489,8 +1489,13 @@ func TestPageHasIndependentRestorePanel(t *testing.T) {
 			t.Errorf("页面里应当有 %q", want)
 		}
 	}
-	if strings.Contains(DefaultPage, "pubFrom") {
+	if strings.Contains(DefaultPage, "从链上恢复的入口") {
 		t.Error("发布面板里不该再有从链上恢复的入口：它已经独立成块")
+	}
+	// pubFrom 是「增量基准」：取发布记录续增量，只影响复用判断，
+	// 与把站点内容取回来的恢复面板是两件事，各有各的门。
+	if !strings.Contains(DefaultPage, "增量基准") {
+		t.Error("发布面板应当提供增量基准（换机器或恢复后续增量）")
 	}
 }
 
@@ -1513,6 +1518,33 @@ func TestResolveSiteOnlyAllowsStartupDir(t *testing.T) {
 	}
 	if got, err := s.resolveSite(site); err != nil || got != site {
 		t.Fatalf("传启动目录本身应当放行，实际 %q, %v", got, err)
+	}
+}
+
+// 取消要能退掉阻塞中的任务（模拟等签名的阻塞），并把状态落到 failed。
+// 签名失败后靠它释放发布锁与灰按钮，没有它任务会挂到 30 分钟超时。
+func TestTaskCancelReleasesBlockedWork(t *testing.T) {
+	s := NewStore()
+	started := make(chan struct{})
+	id := s.Run("x", func(t *Task) {
+		close(started)
+		<-t.ctx.Done() // 模拟等钱包签名的阻塞
+	})
+	<-started
+
+	s.Get(id).Cancel()
+
+	select {
+	case <-s.Get(id).ctx.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("取消后阻塞应当退掉")
+	}
+	snap := s.Get(id).Snapshot()
+	if snap["status"] != "failed" {
+		t.Fatalf("取消后状态应为 failed，实际 %v", snap["status"])
+	}
+	if msg, _ := snap["error"].(string); !strings.Contains(msg, "取消") {
+		t.Fatalf("失败原因应当点明已取消，实际 %q", msg)
 	}
 }
 

@@ -532,8 +532,9 @@ func (s *Server) publishArweave(t *Task, site *publish.Site, req publishRequest,
 		target.Uploader = arweave.NewUploaderWithClient(req.Endpoint, client)
 	}
 
-	// 给整轮等签名加个上限：用户关掉页面时不该把进程永久挂住
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	// 给整轮等签名加个上限：用户关掉页面时，不该把进程永久挂住。
+	// 用 t.ctx 做底：任务被取消时，等签名的阻塞要能当场退掉。
+	ctx, cancel := context.WithTimeout(t.ctx, 30*time.Minute)
 	defer cancel()
 
 	t.Logf("等待钱包确认（在页面右上角连接钱包后会自动逐个弹出）")
@@ -630,7 +631,7 @@ func (s *Server) doVerify(w http.ResponseWriter, r *http.Request, repair bool) {
 		statePath := publish.StatePath(site, "arweave", repo)
 		var rec *publish.Record
 		if req.From != "" {
-			rec, err = arweave.FetchRecordWithClient(context.Background(), gateways[0], req.From,
+			rec, err = arweave.FetchRecordWithClient(t.ctx, gateways[0], req.From,
 				publish.RecordRelPath("arweave", repo), client)
 			if err != nil {
 				t.fail(err)
@@ -651,7 +652,7 @@ func (s *Server) doVerify(w http.ResponseWriter, r *http.Request, repair bool) {
 
 		t.Logf("网关 %s；摘要核对 %s", strings.Join(gateways, "、"), map[bool]string{true: "开", false: "关"}[req.CheckContent])
 
-		report, err := arweave.CheckSite(context.Background(), arweave.CheckOptions{
+		report, err := arweave.CheckSite(t.ctx, arweave.CheckOptions{
 			Record:       rec,
 			Gateways:     gateways,
 			Client:       client,
@@ -800,7 +801,7 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	}
 
 	id := s.tasks.Run("restore", func(t *Task) {
-		ctx := context.Background()
+		ctx := t.ctx
 
 		// 先把 manifest 取回来理清映射，再动磁盘。
 		// 入口取不到是常见情形（刚发布的要等网关索引），

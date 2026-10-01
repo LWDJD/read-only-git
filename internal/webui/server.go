@@ -245,6 +245,21 @@ func (s *Server) handleTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// /api/task/<id>/cancel：主动终止任务。
+	//
+	// 主要给签名失败用：签名通道一断，后端会一直等签名到超时，
+	// 发布锁与灰按钮都箨在那上面。取消让它们当场恢复。
+	if id, ok := strings.CutSuffix(rest, "/cancel"); ok {
+		t := s.tasks.Get(id)
+		if t == nil {
+			writeErr(w, http.StatusNotFound, fmt.Errorf("没有这个任务: %s", id))
+			return
+		}
+		t.Cancel()
+		writeJSON(w, map[string]any{"ok": true})
+		return
+	}
+
 	t := s.tasks.Get(rest)
 	if t == nil {
 		writeErr(w, http.StatusNotFound, fmt.Errorf("没有这个任务: %s", rest))

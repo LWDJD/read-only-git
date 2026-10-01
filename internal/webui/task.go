@@ -1,6 +1,7 @@
 package webui
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -37,6 +38,12 @@ type Task struct {
 	started time.Time
 	ended   time.Time
 
+	// ctx 是任务的生命周期：取消它，阻塞在等签名/等网络的活就能退出，
+	// 发布锁也随之释放。没有它，签名一失败任务就挂到 30 分钟超时，
+	// 按钮灰着、重试还被锁挡。
+	ctx    context.Context
+	cancel context.CancelFunc
+
 	// sink 非空时日志同时写一份到磁盘。
 	//
 	// 为什么要有它：界面上的日志一刷新就没了，而「发布失败」这类事
@@ -47,13 +54,32 @@ type Task struct {
 }
 
 func newTask(id, kind string) *Task {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &Task{
 		id:      id,
 		kind:    kind,
 		status:  StatusRunning,
 		started: time.Now(),
+		ctx:     ctx,
+		cancel:  cancel,
 		subs:    make(map[chan string]struct{}),
 	}
+}
+
+// Cancel 主动终止任务：通知上下文退掉阻塞的活，并记一条失败。
+//
+// 已经结束的任务再取消是空操作：胜负已分，别把结果改掉。
+func (t *Task) Cancel() {
+	t.mu.Lock()
+	running := t.status == StatusRunning
+	t.mu.Unlock()
+	if !running {
+		return
+	}
+	if t.cancel != nil {
+		t.cancel()
+	}
+	t.fail(fmt.Errorf("已取消"))
 }
 
 // Logf 记一行日志，并推给所有订阅者。
@@ -85,6 +111,10 @@ func (t *Task) Logf(format string, args ...any) {
 
 func (t *Task) succeed(result any) {
 	t.mu.Lock()
+	if t.status != StatusRunning {
+		t.mu.Unlock()
+		return
+	}
 	t.status = StatusDone
 	t.result = result
 	t.ended = time.Now()
@@ -102,6 +132,11 @@ func (t *Task) succeed(result any) {
 
 func (t *Task) fail(err error) {
 	t.mu.Lock()
+	if t.status != StatusRunning {
+		// 先到者定胜负：取消与自然失败可能同时到，只认第一次
+		t.mu.Unlock()
+		return
+	}
 	t.status = StatusFailed
 	t.errMsg = err.Error()
 	t.ended = time.Now()
@@ -258,6 +293,7 @@ func (s *Store) Run(kind string, fn func(*Task)) string {
 	s.mu.Unlock()
 
 	go func() {
+		defer t.cancel() // 任务终了释放上下文；已被取消时这里是空操作
 		defer func() {
 			// 任务里的 panic 不该带走整个服务，转成一条失败记录
 			if r := recover(); r != nil {
