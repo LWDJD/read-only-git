@@ -34,8 +34,10 @@ func TestFindStatePathFallsBackToExistingFile(t *testing.T) {
 		t.Fatalf("精确名存在时应当用它，实际 %q", got)
 	}
 
-	// 都没有时给标准名（首次发布会往那里写）
-	if got := FindStatePath(root, "arweave", "fresh"); got != StatePath(root, "arweave", "fresh") {
+	// 都没有时给标准名（首次发布会往那里写）。用干净目录：
+	// 上面写过的记录就该被扫到，那是设计意图，不是干扰。
+	fresh := t.TempDir()
+	if got := FindStatePath(fresh, "arweave", "fresh"); got != StatePath(fresh, "arweave", "fresh") {
 		t.Fatalf("无记录时应当给标准名，实际 %q", got)
 	}
 }
