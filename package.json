@@ -8,7 +8,7 @@
     "dev": "node scripts/serve.mjs",
     "serve": "node scripts/serve.mjs",
     "dev:vite": "vite",
-    "prepare-repo": "python scripts/prepare-repo.py",
-    "selftest": "node scripts/selftest.mjs"
+    "selftest": "node scripts/selftest.mjs",
+    "arjs-vectors": "node scripts/arjs-vectors.cjs"
   }
 }

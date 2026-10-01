@@ -5,5 +5,26 @@ node_modules/
 tmp/
 .test/
 
-# 部署产物：裸仓库由 prepare-repo 脚本生成，不进版本库
+# 编辑器与语言运行时缓存
+.idea/
+.vscode/
+__pycache__/
+*.pyc
+
+# 站点骨架的真身在 internal/sitekit/site/，用 rog site init 铺开。
+# public/ 只是产物目录：骨架、裸仓库、清单都由工具生成，不进版本库。
+public/index.html
+public/src/
+public/repository.json
 public/*.git/
+
+# Go 构建产物（含构建覆盖时留下的临时名）
+/rog
+/rog.exe
+/rog.exe~
+/rog-dev.exe
+/rog-dev.exe~
+
+# 本地笔记：上下文备忘与待办方案，不作为项目内容
+HANDOFF.md
+MEMO.md

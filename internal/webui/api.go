@@ -1,0 +1,1145 @@
+package webui
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/LWDJD/read-only-git/internal/arweave"
+	"github.com/LWDJD/read-only-git/internal/publish"
+	"github.com/LWDJD/read-only-git/internal/repopack"
+	"github.com/LWDJD/read-only-git/internal/sitekit"
+)
+
+// ---------- 工具 ----------
+
+func writeJSON(w http.ResponseWriter, v any) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+// writeErr 把错误原样透给前端。
+//
+// 尤其是节点或上传服务返回的原话，包装一层就丢了排错线索。
+func writeErr(w http.ResponseWriter, code int, err error) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+}
+
+func decodeBody(w http.ResponseWriter, r *http.Request, into any) bool {
+	if r.Method != http.MethodPost {
+		writeErr(w, http.StatusMethodNotAllowed, fmt.Errorf("这个接口只接受 POST"))
+		return false
+	}
+	// 请求体上限：单请求不该能喂爆进程内存（文件替换的大请求也够用）。
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBytes)
+	if err := json.NewDecoder(r.Body).Decode(into); err != nil {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("请求体不是合法 JSON: %w", err))
+		return false
+	}
+	return true
+}
+
+// maxRequestBytes 是请求体上限（256 MiB）。
+//
+// 定高不为防什么攻击，只为拦住失控的客户端与损坏的请求：
+// 文件替换接口一次可能带很多 base64 文件，但也不会到这个量级。
+const maxRequestBytes = 256 << 20
+
+// safeJoin 把相对路径拼到站点根下，并挡住越界写法。
+//
+// 界面能改文件，就必须挡住 ../ 这类路径，否则一个手滑的请求就能写到站点外面。
+func safeJoin(root, rel string) (string, error) {
+	if strings.TrimSpace(rel) == "" {
+		return "", fmt.Errorf("路径不能为空")
+	}
+	// 先看原始写法：以分隔符开头的，在哪个平台都当作绝对路径拒绝。
+	// 不能只靠 filepath.IsAbs，它在 Windows 上不认 "/etc/passwd" 这种写法，
+	// 会让同一份界面在两个平台上一个放行、一个拦住。
+	if strings.HasPrefix(rel, "/") || strings.HasPrefix(rel, `\`) {
+		return "", fmt.Errorf("路径越界: %q", rel)
+	}
+
+	clean := filepath.Clean(filepath.FromSlash(rel))
+	if clean == "." || filepath.IsAbs(clean) || strings.HasPrefix(clean, "..") {
+		return "", fmt.Errorf("路径越界: %q", rel)
+	}
+
+	full := filepath.Join(root, clean)
+	back, err := filepath.Rel(root, full)
+	if err != nil || strings.HasPrefix(back, "..") {
+		return "", fmt.Errorf("路径越界: %q", rel)
+	}
+	return full, nil
+}
+
+func siteOf(s *Server, given string) string {
+	if strings.TrimSpace(given) != "" {
+		return given
+	}
+	return s.siteDir
+}
+
+// resolveSite 解析要操作的站点目录。
+//
+// 只认启动时 --site 指定的那一个：请求里带别的目录一律拒绝。
+// 曾经 given 原样当根目录，等于「token → 全盘读写删」（测试报告 A1）；
+// 设计承诺是 token 只能改站点文件，这里把承诺变成事实。
+func (s *Server) resolveSite(given string) (string, error) {
+	given = strings.TrimSpace(given)
+	if given == "" {
+		return s.siteDir, nil
+	}
+	if sameFile(given, s.siteDir) {
+		return s.siteDir, nil
+	}
+	return "", fmt.Errorf("只能操作启动时指定的站点目录 %s，不能换别的目录", s.siteDir)
+}
+
+// ---------- 状态 ----------
+
+type fileState struct {
+	Path   string `json:"path"`
+	Size   int64  `json:"size"`
+	Digest string `json:"digest"`
+}
+
+type repoState struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+}
+
+type recordState struct {
+	File    string `json:"file"`
+	Target  string `json:"target"`
+	Root    string `json:"root"`
+	Count   int    `json:"count"`
+	Updated string `json:"updated"`
+}
+
+type templateState struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Files       int    `json:"files"`
+}
+
+type scaffoldState struct {
+	Templates []templateState `json:"templates"`
+	// Missing 是站点里还缺多少个骨架文件。
+	// 大于零说明这个目录还不算一个能打开的站点，界面会提示布一下。
+	Missing int `json:"missing"`
+	Total   int `json:"total"`
+}
+
+type stateResponse struct {
+	Site   string `json:"site"`
+	Exists bool   `json:"exists"`
+	// Cwd 是 webui 进程的工作目录。
+	//
+	// 界面上那些填路径的地方（打包源、站点点、恢复目标）都允许写相对路径，
+	// 而相对路径的基准就是这个目录。不把它显示出来，用户就无从判断
+	// 自己写的 `public` 究章指的是哪里——实测就撞过这个坑：填了 public，
+	// 报「目录不是空的」，但错误里没说那是哪个 public。
+	Cwd string `json:"cwd"`
+	// LogDir 是任务日志的落脚点。显出来是因为日志的价值在「出事时找得到」。
+	LogDir    string        `json:"logDir"`
+	Files     []fileState   `json:"files"`
+	TotalSize int64         `json:"totalSize"`
+	Repos     []repoState   `json:"repos"`
+	Records   []recordState `json:"records"`
+	Scaffold  scaffoldState `json:"scaffold"`
+	Error     string        `json:"error,omitempty"`
+}
+
+func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
+	site, err := s.resolveSite(r.URL.Query().Get("site"))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, s.buildState(site))
+}
+
+// buildState 每次都重新扫描并逐文件重算摘要。
+//
+// 这里绝不能换成缓存：管理员可能绕过界面直接改目录，
+// 一旦缓存，界面就会显示与磁盘不符的内容。
+func (s *Server) buildState(site string) stateResponse {
+	out := stateResponse{Site: site}
+	if wd, err := os.Getwd(); err == nil {
+		out.Cwd = wd
+	}
+	if dir, err := DefaultLogDir(); err == nil {
+		out.LogDir = dir
+	}
+
+	// 站点目录不存在不算错误：新建站点时它就是空的。
+	// 把骨架缺多少一并算出来，界面才知道该不该提示布一下。
+	info, err := os.Stat(site)
+	if err != nil || !info.IsDir() {
+		out.Scaffold = buildScaffold(site)
+		out.Error = fmt.Sprintf("站点目录还不存在: %s", site)
+		return out
+	}
+	out.Exists = true
+
+	scanned, err := publish.Scan(site)
+	if err != nil {
+		out.Error = err.Error()
+		return out
+	}
+	for _, f := range scanned.Files {
+		out.Files = append(out.Files, fileState{Path: f.Path, Size: f.Size, Digest: f.Digest})
+	}
+	out.TotalSize = scanned.TotalSize()
+
+	out.Repos = readRegistry(site)
+	out.Records = readRecords(site)
+	out.Scaffold = buildScaffold(site)
+	return out
+}
+
+// buildScaffold 汇总模板信息与目标目录里还缺多少骨架文件。
+//
+// 目录不存在时，所有文件都算缺：这正是「还没有站点」的样子。
+func buildScaffold(site string) scaffoldState {
+	var out scaffoldState
+	for _, tpl := range sitekit.Templates() {
+		out.Templates = append(out.Templates, templateState{
+			ID:          tpl.ID,
+			Name:        tpl.Name,
+			Description: tpl.Description,
+			Files:       tpl.Files,
+		})
+	}
+	out.Total = len(templateFiles("default"))
+
+	missing, err := sitekit.Missing("default", site)
+	if err != nil {
+		// 取不到清单就当作「不知道」，不拿它去吓用户
+		out.Missing = 0
+		return out
+	}
+	out.Missing = len(missing)
+	return out
+}
+
+func templateFiles(id string) []string {
+	files, err := sitekit.Files(id)
+	if err != nil {
+		return nil
+	}
+	return files
+}
+
+func readRegistry(site string) []repoState {
+	data, err := os.ReadFile(filepath.Join(site, "repository.json"))
+	if err != nil {
+		return nil
+	}
+	var parsed struct {
+		Repositories []struct {
+			Name        string `json:"name"`
+			Description string `json:"description"`
+		} `json:"repositories"`
+	}
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return nil
+	}
+	out := make([]repoState, 0, len(parsed.Repositories))
+	for _, r := range parsed.Repositories {
+		out = append(out, repoState{Name: r.Name, Description: r.Description})
+	}
+	return out
+}
+
+// readRecords 汇总 .rog 下的发布记录，只取给人看的摘要。
+func readRecords(site string) []recordState {
+	dir := filepath.Join(site, publish.StateDir)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+
+	var out []recordState
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasPrefix(e.Name(), "publish-") || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		rec, err := publish.LoadRecord(filepath.Join(dir, e.Name()))
+		if err != nil || rec == nil {
+			out = append(out, recordState{File: e.Name(), Target: "(记录损坏)"})
+			continue
+		}
+		updated := ""
+		if !rec.At.IsZero() {
+			updated = rec.At.Format("2006-01-02 15:04")
+		}
+		out = append(out, recordState{
+			File:    e.Name(),
+			Target:  rec.Target,
+			Root:    rec.Root,
+			Count:   len(rec.Refs),
+			Updated: updated,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].File < out[j].File })
+	return out
+}
+
+// ---------- 打包 ----------
+
+type packRequest struct {
+	Source string `json:"source"`
+	OutDir string `json:"outDir"`
+	Name   string `json:"name"`
+	// Rebuild 为真时忽略已有产物，从零重建。
+	// 默认不填就是自动：目标里已有这个仓库就增量，否则全量。
+	Rebuild bool `json:"rebuild"`
+	// Proxy 是拉远端仓库时给 git 用的代理地址。
+	//
+	// 单独一个字段，与发布时的 http 代理分开：拉取用 git，
+	// 上传用 Go 自己的 client，两者走的是不同的通道。
+	Proxy string `json:"proxy"`
+}
+
+func (s *Server) handlePack(w http.ResponseWriter, r *http.Request) {
+	var req packRequest
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	if strings.TrimSpace(req.Source) == "" {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("源仓库不能为空"))
+		return
+	}
+
+	id := s.tasks.Run("pack", func(t *Task) {
+		res, err := repopack.Pack(repopack.Options{
+			Source:  req.Source,
+			OutDir:  req.OutDir,
+			Name:    req.Name,
+			Rebuild: req.Rebuild,
+			Proxy:   req.Proxy,
+			Logf:    t.Logf,
+		})
+		if err != nil {
+			t.fail(err)
+			return
+		}
+		t.succeed(map[string]any{
+			"name":   res.Name,
+			"branch": res.Branch,
+			"via":    res.Via,
+			"files":  len(res.Files),
+			"size":   res.TotalSize,
+			"packs":  len(res.Packs),
+		})
+	})
+	writeJSON(w, map[string]string{"taskId": id})
+}
+
+// ---------- 发布 ----------
+
+// repoNameFor 从站点目录名推出仓库名。
+//
+// 界面上不再提供这一栏。一个站点对应一个仓库，站点目录名就是它的名字：
+// 让它可填只会多一个能填错的地方，而填错的代价是产物里的 Repo 标签
+// 与发布记录的身份一起错，这两样都不该由人在界面上临时决定。
+//
+// CLI 那边仍可用 --repo 显式覆盖，那是脚本场景，不是随手填。
+func repoNameFor(siteRoot string) string {
+	return filepath.Base(filepath.Clean(siteRoot))
+}
+
+type publishRequest struct {
+	Site     string `json:"site"`
+	Target   string `json:"target"` // local / turbo / l1
+	Dest     string `json:"dest"`   // local 用
+	Endpoint string `json:"endpoint"`
+	Node     string `json:"node"`
+	From     string `json:"from"`
+	Gateway  string `json:"gateway"`
+	// ProxyMode 是网络出口：system（默认，跟随系统设置）/ manual / off。
+	ProxyMode string `json:"proxyMode"`
+	// ProxyURL 只在 manual 模式下用到。
+	ProxyURL string `json:"proxyUrl"`
+}
+
+func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
+	var req publishRequest
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	resolved, err := s.resolveSite(req.Site)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	req.Site = resolved
+	if strings.TrimSpace(req.Site) == "" {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("站点目录不能为空"))
+		return
+	}
+
+	id := s.tasks.Run("publish", func(t *Task) {
+		if err := s.doPublish(t, req); err != nil {
+			t.fail(err)
+			return
+		}
+	})
+	writeJSON(w, map[string]string{"taskId": id})
+}
+
+func (s *Server) doPublish(t *Task, req publishRequest) error {
+	site, err := publish.Scan(req.Site)
+	if err != nil {
+		return err
+	}
+	if len(site.Files) == 0 {
+		return fmt.Errorf("%s 里没有可发布的文件", req.Site)
+	}
+
+	// 同一站点同一目标同时只允许一条发布在跑。
+	// 连点两下按钮就会撞到这里，与其两条发布互踩同一份记录，
+	// 不如直接把后一条拒掉，并告诉她原因。本地目标按目录分键：
+	// 发到两个不同目录的两条发布不该互相挡。
+	lockName := req.Target
+	if req.Target == "local" {
+		lockName = "local:" + req.Dest
+	}
+	release, err := publish.Acquire(site.Root, lockName)
+	if err != nil {
+		return err
+	}
+	defer release()
+
+	t.Logf("站点 %s：%d 个文件", site.Root, len(site.Files))
+
+	switch req.Target {
+	case "local":
+		return s.publishLocal(t, site, req)
+	case "turbo":
+		return s.publishArweave(t, site, req, false)
+	case "l1":
+		return s.publishArweave(t, site, req, true)
+	default:
+		return fmt.Errorf("未知发布目标: %q（可选 local / turbo / l1）", req.Target)
+	}
+}
+
+func (s *Server) publishLocal(t *Task, site *publish.Site, req publishRequest) error {
+	if strings.TrimSpace(req.Dest) == "" {
+		return fmt.Errorf("本地发布需要填目标目录")
+	}
+
+	target := &publish.Local{Dir: req.Dest, Logf: t.Logf}
+	// 记录身份用规范化后的绝对路径："out" 与 "./out" 是同一个地方，
+	// 不该生成两份记录把增量复用白白丢掉。
+	destKey := req.Dest
+	if abs, err := filepath.Abs(req.Dest); err == nil {
+		destKey = abs
+	}
+	statePath := publish.StatePath(site.Root, target.Name(), destKey)
+
+	prev, err := publish.LoadRecord(statePath)
+	if err != nil {
+		t.Logf("! %v（按首次发布处理）", err)
+		prev = nil
+	}
+
+	rec, err := target.Publish(context.Background(), site, prev)
+	if rec != nil {
+		if saveErr := publish.SaveRecord(statePath, rec); saveErr != nil {
+			t.Logf("! 记录保存失败: %v", saveErr)
+		}
+	}
+	if err != nil {
+		return err
+	}
+
+	t.Logf("入口 %s", rec.Root)
+	t.succeed(map[string]any{"root": rec.Root, "statePath": statePath})
+	return nil
+}
+
+func (s *Server) publishArweave(t *Task, site *publish.Site, req publishRequest, useL1 bool) error {
+	repo := repoNameFor(site.Root)
+
+	// 一个 client 贯穿整轮发布：报交易、逐块 /chunk、取记录都走它。
+	// 分开造的话，代理设置很容易只对其中几步生效。
+	mode, err := arweave.ParseProxyMode(req.ProxyMode)
+	if err != nil {
+		return err
+	}
+	if mode == arweave.ProxyManual && strings.TrimSpace(req.ProxyURL) == "" {
+		return fmt.Errorf("手动代理模式需要填代理地址")
+	}
+	client, err := arweave.NewClient(arweave.ProxyConfig{Mode: mode, URL: req.ProxyURL}, 0)
+	if err != nil {
+		return err
+	}
+
+	// 签名通道就是挂在 webui /sign/ 下的那一个。
+	//
+	// 不再另起服务、不再另开页面：用户就在当前页面里确认钱包。
+	// 同时也不再往日志里打一个「签名页 <地址>」——那个地址现在不存在了。
+	svc := s.sign
+
+	// 记录认 .rog/ 里已有的那份（换目录/恢复后文件名哈希会对不上，账本却一直在）。
+	statePath := publish.FindStatePath(site.Root, "arweave", repo)
+	prev, err := publish.LoadRecord(statePath)
+	if err != nil {
+		t.Logf("! %v（按首次发布处理）", err)
+		prev = nil
+	}
+
+	if req.From != "" {
+		fetched, ferr := arweave.FetchRecordWithClient(context.Background(), req.Gateway, req.From,
+			publish.RecordRelPath("arweave", repo), client)
+		if ferr != nil {
+			return ferr
+		}
+		if err := publish.SaveRecord(statePath, fetched); err != nil {
+			return err
+		}
+		t.Logf("已从链上取回发布记录，含 %d 个文件引用", len(fetched.Refs))
+		prev = fetched
+	}
+
+	target := &arweave.Target{
+		Repo:       repo,
+		Signer:     svc,
+		RecordPath: publish.RecordRelPath("arweave", repo),
+		// 签好但没提交成功的交易落在这里，重试时直接复用，
+		// 不必再让用户去钱包里点一次。
+		PendingPath: publish.PendingPath(site.Root, "arweave", repo),
+		Client:      client,
+		Logf:        t.Logf,
+	}
+	if useL1 {
+		target.TxSigner = svc
+		target.Node = req.Node
+	} else {
+		target.Uploader = arweave.NewUploaderWithClient(req.Endpoint, client)
+	}
+
+	// 给整轮等签名加个上限：用户关掉页面时，不该把进程永久挂住。
+	// 用 t.ctx 做底：任务被取消时，等签名的阻塞要能当场退掉。
+	ctx, cancel := context.WithTimeout(t.ctx, 30*time.Minute)
+	defer cancel()
+
+	t.Logf("等待钱包确认（在页面右上角连接钱包后会自动逐个弹出）")
+
+	rec, err := target.Publish(ctx, site, prev)
+	if rec != nil {
+		if saveErr := publish.SaveRecord(statePath, rec); saveErr != nil {
+			t.Logf("! 记录保存失败: %v", saveErr)
+		}
+	}
+	if err != nil {
+		// 超时这一句要说清：它会以 context.DeadlineExceeded 的形式上来，
+		// 而那句话看不出到底卡在哪。实际上卡的就是等钱包。
+		if errors.Is(err, context.DeadlineExceeded) {
+			return fmt.Errorf("等钱包签名超时（30 分钟）。页面可能关了、或者签名一直没有完成")
+		}
+		return err
+	}
+
+	t.Logf("入口 %s", rec.Root)
+	t.Logf("网关预览 https://arweave.net/%s", rec.Root)
+	t.succeed(map[string]any{
+		"root":      rec.Root,
+		"statePath": statePath,
+		"repo":      repo,
+		"preview":   "https://arweave.net/" + rec.Root,
+	})
+	return nil
+}
+
+// ---------- 检查与补传 ----------
+
+type verifyRequest struct {
+	Site     string   `json:"site"`
+	Gateways []string `json:"gateways"`
+	// From 非空时不用本地记录，从链上取一份来核对。
+	From         string `json:"from"`
+	CheckContent bool   `json:"checkContent"`
+	// 网络出口与发布面板同源。
+	ProxyMode string `json:"proxyMode"`
+	ProxyURL  string `json:"proxyUrl"`
+}
+
+func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
+	s.doVerify(w, r, false)
+}
+
+// handleVerifyRepair 清坏引用：检查 + 把 missing/mismatch 的从记录里删掉。
+//
+// 补传不在这里做：清完跑一次正常发布即可。界面两个按钮两个端点，
+// 不做任何自动衔接。
+func (s *Server) handleVerifyRepair(w http.ResponseWriter, r *http.Request) {
+	s.doVerify(w, r, true)
+}
+
+func (s *Server) doVerify(w http.ResponseWriter, r *http.Request, repair bool) {
+	var req verifyRequest
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	site, err := s.resolveSite(req.Site)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	repo := repoNameFor(site)
+
+	mode, err := arweave.ParseProxyMode(req.ProxyMode)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if mode == arweave.ProxyManual && strings.TrimSpace(req.ProxyURL) == "" {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("手动代理模式需要填代理地址"))
+		return
+	}
+	client, err := arweave.NewClient(arweave.ProxyConfig{Mode: mode, URL: req.ProxyURL}, 0)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	gateways := make([]string, 0, len(req.Gateways))
+	for _, g := range req.Gateways {
+		if g = strings.TrimSpace(g); g != "" {
+			gateways = append(gateways, g)
+		}
+	}
+	if len(gateways) == 0 {
+		gateways = append(gateways, arweave.KnownNodes...)
+	}
+
+	id := s.tasks.Run("verify", func(t *Task) {
+		statePath := publish.FindStatePath(site, "arweave", repo)
+		var rec *publish.Record
+		if req.From != "" {
+			rec, err = arweave.FetchRecordWithClient(t.ctx, gateways[0], req.From,
+				publish.RecordRelPath("arweave", repo), client)
+			if err != nil {
+				t.fail(err)
+				return
+			}
+			t.Logf("记录取自链上入口 %s（%d 个引用）", req.From, len(rec.Refs))
+		} else {
+			rec, err = publish.LoadRecord(statePath)
+			if err != nil {
+				t.fail(fmt.Errorf("读发布记录失败: %w（可改用入口 id 从链上取）", err))
+				return
+			}
+			if rec == nil {
+				t.fail(fmt.Errorf("%s 还没有发布记录；先发布一次，或用入口 id 从链上取", statePath))
+				return
+			}
+		}
+
+		t.Logf("网关 %s；摘要核对 %s", strings.Join(gateways, "、"), map[bool]string{true: "开", false: "关"}[req.CheckContent])
+
+		report, err := arweave.CheckSite(t.ctx, arweave.CheckOptions{
+			Record:       rec,
+			Gateways:     gateways,
+			Client:       client,
+			CheckContent: req.CheckContent,
+			Repair:       repair,
+			Logf:         t.Logf,
+		})
+		if err != nil {
+			t.fail(err)
+			return
+		}
+
+		if repair {
+			if err := publish.SaveRecord(statePath, rec); err != nil {
+				t.fail(err)
+				return
+			}
+			t.Logf("已清掉 %d 条坏引用并写入记录", report.Repaired)
+			if report.Repaired > 0 {
+				t.Logf("下一步：回「发布」面板跑一次发布，缺失的文件会重新签名上传")
+			}
+		} else if report.Missing+report.Mismatch > 0 {
+			t.Logf("有 %d 条坏引用。点「清理坏引用」清掉它们，再发布一次即可补上",
+				report.Missing+report.Mismatch)
+		}
+
+		t.succeed(map[string]any{"report": report})
+	})
+	writeJSON(w, map[string]string{"taskId": id})
+}
+
+// ---------- 站点骨架 ----------
+
+type siteInitRequest struct {
+	Site      string `json:"site"`
+	Template  string `json:"template"`
+	Overwrite bool   `json:"overwrite"`
+}
+
+// handleSiteInit 把内嵌的前端模板铺到站点目录。
+//
+// 有了它，一个 exe 就能从零把站点立起来：不必另行准备前端文件。
+func (s *Server) handleSiteInit(w http.ResponseWriter, r *http.Request) {
+	var req siteInitRequest
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	resolved, err := s.resolveSite(req.Site)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	req.Site = resolved
+	if strings.TrimSpace(req.Site) == "" {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("站点目录不能为空"))
+		return
+	}
+	if req.Template == "" {
+		req.Template = "default"
+	}
+
+	id := s.tasks.Run("site-init", func(t *Task) {
+		abs, err := filepath.Abs(req.Site)
+		if err != nil {
+			t.fail(err)
+			return
+		}
+
+		written, err := sitekit.Materialize(req.Template, abs, req.Overwrite)
+		if err != nil {
+			t.fail(err)
+			return
+		}
+
+		if len(written) == 0 {
+			t.Logf("骨架已经齐了，没有改动")
+		} else {
+			t.Logf("写入 %d 个文件到 %s", len(written), abs)
+			for _, rel := range written {
+				t.Logf("  %s", rel)
+			}
+		}
+
+		missing, err := sitekit.Missing(req.Template, abs)
+		if err != nil {
+			t.fail(err)
+			return
+		}
+		if len(missing) > 0 {
+			t.Logf("还缺 %d 个文件（勾选覆盖可补回来）", len(missing))
+		}
+
+		t.succeed(map[string]any{"written": len(written), "site": abs})
+	})
+	writeJSON(w, map[string]string{"taskId": id})
+}
+
+// ---------- 从链上恢复 ----------
+
+type restoreRequest struct {
+	Entry   string `json:"entry"`
+	Dest    string `json:"dest"`
+	Gateway string `json:"gateway"`
+	// 网络出口与发布面板同源：这里也是对外请求，同样会被代理影响。
+	ProxyMode string `json:"proxyMode"`
+	ProxyURL  string `json:"proxyUrl"`
+}
+
+// handleRestore 把链上的站点内容取回到一个空目录。
+//
+// 与发布请求里的 `from` 字段不是一件事：那是「只把发布记录取回来，
+// 好让下次增量少传几个文件」，服务于发布；这是「把内容本身落地成
+// 一个可用的目录」，服务于换机器之后的重建。两件事掺在一个面板里
+// 会让人以为恢复要跟发布一起做，所以它有自己的入口与目标目录。
+//
+// 目标目录必须是空的：这个动作会铺满一整个目录，如果里面原本有东西，
+// 要么覆盖别人的工作、要么混出一份半新半旧的结果，两种都不该悄悄发生。
+// 清空目录交给用户自己做——他知道那里原来是什么。
+func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
+	var req restoreRequest
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	if strings.TrimSpace(req.Entry) == "" {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("入口 id 不能为空"))
+		return
+	}
+	if strings.TrimSpace(req.Dest) == "" {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("目标目录不能为空"))
+		return
+	}
+
+	mode, err := arweave.ParseProxyMode(req.ProxyMode)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if mode == arweave.ProxyManual && req.ProxyURL == "" {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("手动代理模式需要代理地址"))
+		return
+	}
+	client, err := arweave.NewClient(arweave.ProxyConfig{Mode: mode, URL: req.ProxyURL}, 0)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	id := s.tasks.Run("restore", func(t *Task) {
+		ctx := t.ctx
+
+		// 先把 manifest 取回来理清映射，再动磁盘。
+		// 入口取不到是常见情形（刚发布的要等网关索引），
+		// 这种「还没开始就能预知的失败」不该等到写了一半个文件才发现。
+		plan, err := arweave.FetchManifest(ctx, req.Gateway, req.Entry, client)
+		if err != nil {
+			t.fail(err)
+			return
+		}
+		index := plan.IndexPath
+		if index == "" {
+			index = "（无）"
+		}
+		t.Logf("入口 %s：%d 个路径，默认入口 %s", plan.Entry, len(plan.Paths), index)
+
+		n, err := arweave.RestoreInto(ctx, req.Gateway, plan, req.Dest, client, t.Logf)
+		if err != nil {
+			t.fail(err)
+			return
+		}
+		t.Logf("恢复到 %s，共 %d 个文件", req.Dest, n)
+		t.succeed(map[string]any{"count": n, "dest": req.Dest})
+	})
+	writeJSON(w, map[string]string{"taskId": id})
+}
+
+// ---------- 文件 ----------
+
+type replaceFile struct {
+	Path  string `json:"path"`
+	Bytes []byte `json:"bytes"` // JSON 里是 base64
+}
+
+type replaceRequest struct {
+	Site  string        `json:"site"`
+	Files []replaceFile `json:"files"`
+}
+
+type replaceResult struct {
+	Path  string `json:"path"`
+	Size  int    `json:"size,omitempty"`
+	Error string `json:"error,omitempty"`
+}
+
+// handleFileReplace 批量写入文件。
+//
+// 界面一次可能拖进来多个文件与整个目录，逐个发请求既慢又要处理半途失败，
+// 所以一次收全。「重名该覆盖还是跳过」在界面侧已经问过用户了，这里只管写。
+//
+// 一个文件写失败不影响其余：每个都单独报告结果，前端照实显示。
+func (s *Server) handleFileReplace(w http.ResponseWriter, r *http.Request) {
+	var req replaceRequest
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	site, err := s.resolveSite(req.Site)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if len(req.Files) == 0 {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("没有要写入的文件"))
+		return
+	}
+
+	results := make([]replaceResult, 0, len(req.Files))
+	for _, f := range req.Files {
+		if err := s.writeSiteFile(site, f.Path, f.Bytes); err != nil {
+			results = append(results, replaceResult{Path: f.Path, Error: err.Error()})
+			continue
+		}
+		results = append(results, replaceResult{Path: f.Path, Size: len(f.Bytes)})
+	}
+
+	writeJSON(w, map[string]any{"ok": true, "results": results})
+}
+
+// writeSiteFile 写一个站点内的文件，路径越界一律拒绝。
+func (s *Server) writeSiteFile(site, rel string, data []byte) error {
+	full, err := safeJoin(site, rel)
+	if err != nil {
+		return err
+	}
+	// 已是符号链接时拒绝：WriteFile 会顺着链接写到站点外去
+	if info, lerr := os.Lstat(full); lerr == nil && info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s 是符号链接，拒绝覆盖", rel)
+	}
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(full, data, 0o644)
+}
+
+type deleteRequest struct {
+	Site string `json:"site"`
+	Path string `json:"path"`
+}
+
+// handleFileDelete 删掉一个文件或一整个目录。
+//
+// 目录用 RemoveAll 递归删。这个动作不能撤销，所以界面那边必须先问过用户；
+// 这里只负责执行，并把删了什么东西说清楚。
+func (s *Server) handleFileDelete(w http.ResponseWriter, r *http.Request) {
+	var req deleteRequest
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	site, err := s.resolveSite(req.Site)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+
+	full, err := safeJoin(site, req.Path)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	// 别把站点根自己删了：那一下会把整个站点连同 .rog 一起清掉
+	if sameFile(full, site) {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("不能删除站点根目录"))
+		return
+	}
+
+	info, err := os.Stat(full)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, err)
+		return
+	}
+
+	if info.IsDir() {
+		if err := os.RemoveAll(full); err != nil {
+			writeErr(w, http.StatusInternalServerError, err)
+			return
+		}
+		writeJSON(w, map[string]any{"ok": true, "path": req.Path, "dir": true})
+		return
+	}
+
+	if err := os.Remove(full); err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "path": req.Path})
+}
+
+// sameFile 判断两个路径是不是同一个位置。
+func sameFile(a, b string) bool {
+	fa, err1 := filepath.Abs(a)
+	fb, err2 := filepath.Abs(b)
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	return strings.EqualFold(filepath.Clean(fa), filepath.Clean(fb))
+}
+
+type copyRequest struct {
+	Site string   `json:"site"`
+	From []string `json:"from"` // 源路径（相对站点根）
+	To   string   `json:"to"`   // 目标目录（相对站点根），空串表示根
+}
+
+// handleFileCopy 把一批文件或目录复制到另一个目录里。
+//
+// 与拖入同一条思路：目标就是「那个目录」，不是某个文件，
+// 重不重名由调用方（界面）先问过用户。
+//
+// 同名时在这里直接覆盖：界面已经把选择交代给用户了，
+// 再一次静默跳过反而会让人以为复制成功了。
+func (s *Server) handleFileCopy(w http.ResponseWriter, r *http.Request) {
+	var req copyRequest
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	site, err := s.resolveSite(req.Site)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if len(req.From) == 0 {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("没有指定要复制的东西"))
+		return
+	}
+
+	dstDir, err := safeJoin(site, req.To)
+	if err != nil {
+		// 空 to 表示站点根
+		if strings.TrimSpace(req.To) != "" {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		dstDir = site
+	}
+	if err := os.MkdirAll(dstDir, 0o755); err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	results := make([]replaceResult, 0, len(req.From))
+	for _, rel := range req.From {
+		src, err := safeJoin(site, rel)
+		if err != nil {
+			results = append(results, replaceResult{Path: rel, Error: err.Error()})
+			continue
+		}
+		name := filepath.Base(filepath.Clean(src))
+		dst := filepath.Join(dstDir, name)
+
+		// 复制到它自己所在的目录里，等于原地不动，没意义
+		if sameFile(src, dst) {
+			results = append(results, replaceResult{Path: rel, Error: "源与目标相同"})
+			continue
+		}
+		// 不允许把目录复制进它自己的子目录：那会无限递归
+		if inside(src, dst) {
+			results = append(results, replaceResult{Path: rel, Error: "不能把目录复制进它自己里面"})
+			continue
+		}
+
+		if err := copyTree(src, dst); err != nil {
+			results = append(results, replaceResult{Path: rel, Error: err.Error()})
+			continue
+		}
+		rel2, _ := filepath.Rel(site, dst)
+		results = append(results, replaceResult{Path: filepath.ToSlash(rel2)})
+	}
+
+	writeJSON(w, map[string]any{"ok": true, "results": results})
+}
+
+// inside 判断 child 是否在 parent 里面（含自身）。
+func inside(parent, child string) bool {
+	pa, err1 := filepath.Abs(parent)
+	ca, err2 := filepath.Abs(child)
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	rel, err := filepath.Rel(pa, ca)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (!strings.HasPrefix(rel, "..") && !filepath.IsAbs(rel))
+}
+
+// copyTree 递归复制文件或目录。
+//
+// 用 Lstat 不跟随符号链接：链接条目一律拒绝，否则站点里预置一个
+// 指向外部的链接就能把外面的整棵树拉进来；指向祖先的链接还会
+// 让递归转不出去。深度上限是第二道保险。
+func copyTree(src, dst string) error {
+	return copyTreeAt(src, dst, 0)
+}
+
+const copyTreeMaxDepth = 32
+
+func copyTreeAt(src, dst string, depth int) error {
+	if depth > copyTreeMaxDepth {
+		return fmt.Errorf("目录层级超过 %d 层，中止复制", copyTreeMaxDepth)
+	}
+	info, err := os.Lstat(src)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s 是符号链接，跳过不复制", src)
+	}
+
+	if !info.IsDir() {
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			return err
+		}
+		return copyFile(src, dst, info.Mode())
+	}
+
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if err := copyTreeAt(filepath.Join(src, e.Name()), filepath.Join(dst, e.Name()), depth+1); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func copyFile(src, dst string, mode os.FileMode) error {
+	// dst 已是符号链接时拒绝：顺着链接写就是站点外覆盖
+	if info, err := os.Lstat(dst); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("目标已是符号链接，拒绝覆盖: %s", dst)
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode.Perm())
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	_, err = io.Copy(out, in)
+	return err
+}
+
+type mkdirRequest struct {
+	Site string `json:"site"`
+	Path string `json:"path"`
+}
+
+// handleFileMkdir 新建一个目录。
+//
+// 资源管理器总得能建目录，否则「把文件整理到子目录里」这件事就做不了。
+func (s *Server) handleFileMkdir(w http.ResponseWriter, r *http.Request) {
+	var req mkdirRequest
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	site, err := s.resolveSite(req.Site)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+
+	full, err := safeJoin(site, req.Path)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := os.MkdirAll(full, 0o755); err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "path": req.Path})
+}

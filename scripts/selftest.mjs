@@ -13,7 +13,7 @@ import { readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { RemoteRepo } from '../public/src/git/repo.js'
+import { RemoteRepo } from '../internal/sitekit/site/src/git/repo.js'
 
 function git(args, cwd) {
   return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })

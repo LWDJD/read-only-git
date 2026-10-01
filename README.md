@@ -2,7 +2,7 @@
 
 把裸仓库丢到静态托管上，访客就能 `git clone`，同时有一个网页界面浏览文件树、README 和提交历史。
 
-零运行时依赖，零构建步骤。打开 `index.html` 就能跑。
+站点本身零运行时依赖、零构建步骤，打开 `index.html` 就能跑。打包与发布由一个 Go 维护器 `rog` 负责，只在你自己机器上跑。
 
 ## 原理
 
@@ -18,7 +18,7 @@ objects/pack/*.idx
 
 客户端尝试 smart 协议失败后会自动降级，直接读这些文件。所以一台只会发文件的服务器就够了：Arweave 网关、IPFS 网关、Cloudflare Pages、EdgeOne、nginx 都行。
 
-浏览界面同理，服务端不参与，在浏览器里直接解析 packfile，实现见 `public/src/git/`。
+浏览界面同理，服务端不参与，在浏览器里直接解析 packfile，实现见 `internal/sitekit/site/src/git/`。
 
 ## 站点结构
 
@@ -27,9 +27,10 @@ objects/pack/*.idx
 ├── index.html          界面
 ├── repository.json     仓库清单
 ├── src/                界面代码与样式
-└── p2ping.git/         裸仓库，一个项目一个
+└── p2ping/             裸仓库，一个项目一个（目录名就是仓库名）
 ```
 
+这个结构由 `rog site init`（前端）与 `rog pack`（裸仓库与清单）各自写一部分，合起来就是一个能直接部署的站点。
 `repository.json` 存在的原因：静态托管没有目录列表 API，无从得知站上放了哪些仓库。
 
 ```json
@@ -40,41 +41,110 @@ objects/pack/*.idx
 }
 ```
 
-命名约定：`.git` 是目录后缀，不是仓库名的一部分。
+命名约定：目录名就是仓库名，**不带 `.git` 后缀**。
 
 | 位置 | 形式 | 例子 |
 |---|---|---|
-| 磁盘目录 | 带后缀 | `p2ping.git/` |
+| 磁盘目录 | 裸名 | `p2ping/` |
 | `repository.json` / URL / 界面显示 | 裸名 | `p2ping` |
-| clone 地址 | 带后缀 | `<站点>/p2ping.git` |
+| clone 地址 | 裸名 | `<站点>/p2ping` |
 
-前端对 JSON 里的两种写法都做了归一化，但请按裸名写。空、`.`、`..`、含路径分隔符的条目会被忽略。
+为什么不用 `p2ping.git` 这种惯用名：git 对 URL 后缀没有任何要求，
+dumb 协议下客户端只往 base URL 后面拼 `info/refs`、`objects/info/packs`
+这些固定路径（见 git 的 `http.c`），目录叫什么都能 clone。
+而带 `.git` 的路径会被一些网关拦掉，`eth.limo` 就是一例。
+既然两种写法等价，就用不会被拦的那种。
+
+前端对带后缀的写法也做了归一化，但请按裸名写。空、`.`、`..`、含路径分隔符的条目会被忽略。
 
 ## 用法
 
-### 1. 生成可托管的仓库
+### 铺开站点骨架
+
+```
+rog site init [目录] [--template <id>] [--force]
+rog site list
+```
+
+| 选项 | 默认 | 说明 |
+|---|---|---|
+| `[目录]` | `public` | 站点根目录 |
+| `--template <id>` | `default` | 用哪套模板，`rog site list` 看有哪些 |
+| `--force` | 关 | 覆盖已存在的文件；默认只补缺失的 |
+
+前端文件是嵌在二进制里的，所以**光一个 `rog` 就能把站点从零立起来**：
 
 ```bash
-python scripts/prepare-repo.py ../p2ping
-python scripts/prepare-repo.py ../p2ping public p2ping
+rog site init site          # 铺前端
+rog pack . site demo        # 写仓库
 ```
 
-三个参数依次是源仓库、输出目录（默认 `public`）、仓库名（默认取源目录名）。只依赖 Python 3 标准库和 PATH 里的 git，Windows / macOS / Linux 通用。
+不传 `--force` 时它不会碰已经存在的文件：站点里的 `index.html` 可能被你改过，默认不该被模板盖掉。
+传了 `--force` 也有一条例外：`repository.json` 永远不覆盖——它是 pack 维护的仓库清单，不是骨架。
 
-**输出目录要指向站点根**，也就是放着 `index.html` 的那个目录。脚本只管仓库，不管前端：往空目录里跑也能生成，但那个目录还不能直接部署，脚本会在结尾提醒你补上 `index.html` 和 `src/`。
+### 打包
 
 ```
-你的项目/            ← 从仓库克隆下来就是这样
-  public/            ← 部署根，index.html 和 src/ 在这
-    index.html
-    src/
+rog pack [--rebuild] <源仓库> [输出目录] [仓库名]
 ```
 
-所以第一次搭建时，先准备好站点骨架，再让脚本往里面写仓库。
+| 参数 | 必填 | 默认 | 说明 |
+|---|---|---|---|
+| `<源仓库>` | 是 | | 本地路径（普通仓库或裸仓库），或远端地址 |
+| `[输出目录]` | 否 | `public` | 站点根目录，也就是放着 `index.html` 的那个 |
+| `[仓库名]` | 否 | 本地取目录名，远端取地址末段 | 对外标识，带不带 `.git` 后缀等价 |
+| `--rebuild` | 否 | 关 | 忽略已有产物从零重建；默认自动（目标里已有能用的仓库就增量） |
 
-脚本做的事：裸仓库输出到 `<输出目录>/<仓库名>.git/` → `repack -a -d` 把对象收进单 pack → `gc --prune=now` → `update-server-info` 生成索引 → 清掉协议用不到的文件 → 校验并打印清单 → 更新 `repository.json`。
+```bash
+# 本地仓库
+rog pack ../p2ping
 
-重复执行安全：同名仓库覆盖重建，`repository.json` 里那条的 `description` 会保留。
+# 远端仓库，直接复刻一份静态版本
+rog pack https://github.com/LWDJD/p2ping.git
+
+# 指定输出目录和名字
+rog pack git@github.com:LWDJD/p2ping.git site p2ping
+
+# 已有站点上再跑一次：自动增量，只处理变化的对象（不需要任何开关）
+rog pack ../p2ping site p2ping
+
+# 忽略已有产物，从零重建
+rog pack --rebuild ../p2ping site p2ping
+```
+
+尖括号是必填，方括号是可省略。
+
+#### 远端地址
+
+支持 `https://` `git://` `ssh://` `file://`，以及 scp 风格的 `user@host:path`。
+
+远端模式下**拿到的是那个仓库的全部分支和标签**，不只是你本地 checkout 过的那几个。所以想给一个远端仓库做静态镜像，一条命令就够。
+
+私有仓库得先让 git 自己拿到凭据（credential helper 或 SSH key），程序不处理认证。远端不可达或凭据不对时，git 的报错会原样带出来。
+
+#### 输出目录要指向站点根
+
+`pack` 只生成裸仓库和 `repository.json`，不碰前端。所以输出目录得是**放着 `index.html` 的那个目录**，否则产物没法直接部署。用 `rog site init` 就能把这个目录先铺出来：
+
+```
+你的项目/
+  public/                 ← 站点根
+    index.html            ┐ 前端，仓库还没下载时就得有
+    src/                  ┘
+    p2ping.git/           ← pack 写进来的
+    repository.json       ← pack 维护的
+```
+
+往空目录里跑也能生成，但会在结尾提醒你还缺 `index.html`。
+
+#### 它做的事
+
+裸仓库输出到 `<输出目录>/<仓库名>/` → `repack -a -d` 把对象收进单 pack → `gc --prune=now` → `update-server-info` 生成索引 → 清掉协议用不到的文件 → 校验并打印清单 → 更新 `repository.json`。
+
+重复执行安全：默认自动增量——目标里已有能用的仓库就只传变化的对象，
+`--rebuild` 才忽略旧产物从零重建。增量模式下旧 pack 保持不动，
+只把新对象追加进去，refs 对齐到源仓库。仓库名带尾随点/空格、前导 `-`
+或 Windows 设备名（CON 之类）会被直接拒绝，免得两个名字指向同一目录互相覆盖。
 
 产物就七个文件：
 
@@ -100,7 +170,7 @@ git -C public/p2ping.git update-server-info
 <details>
 <summary>clone --bare 失败时的回退链路</summary>
 
-在沙箱或受限的 `sh.exe` 环境下，本地传输建不出管道，`clone --bare` 会报 `couldn't create signal pipe`。脚本这时自动改用 bundle：
+在沙箱或受限的 `sh.exe` 环境下，本地传输建不出管道，`clone --bare` 会报 `couldn't create signal pipe`。程序这时自动改用 bundle：
 
 ```
 git bundle create <bundle> --branches --tags   （在源仓库）
@@ -116,23 +186,104 @@ git symbolic-ref HEAD <ref>
 
 </details>
 
-### 2. 本地预览
+### 发布
+
+发布要签名，私钥在浏览器钱包里，所以会起一个只绑本机的小服务，让你在页面上签字。装 [Wander](https://wander.app/) 即可。
+
+三条路：
+
+| 目标 | 命令 | 说明 |
+|---|---|---|
+| 本地目录 | `rog publish <站点> <目标目录>` | 试跑用，只拷文件，不花钱 |
+| Turbo | `rog publish <站点> --arweave` | 默认。逐个把文件交给上传服务 |
+| L1 | `rog publish <站点> --arweave --l1` | 打成一包，签一笔交易直接提交到节点，不经过任何服务 |
 
 ```bash
-node scripts/serve.mjs                  # 默认根目录 ../public，端口 4173
-node scripts/serve.mjs <根目录> <端口>
-# http://localhost:4173/
+# 先本地试一遍，确认站点结构没问题
+rog publish . /tmp/preview
+
+# 发布到 Turbo
+rog publish . --arweave --repo p2ping
+
+# 走 L1，直接提交到 arweave.net
+rog publish . --arweave --l1 --repo p2ping
 ```
 
-不传根目录时它取脚本旁边的 `../public`，所以在哪个目录调用都行。支持 Range 请求（dumb 协议会用它做局部下载）。
+跑起来会打印一个签名页地址，浏览器里连接钱包、点「开始签名」，签完自动继续。
 
-### 3. 部署
+**增量**：第二次发布只处理内容变了的文件，其余复用上次的 id，不为已付费的内容再付一次。记录存在 `<站点>/.rog/` 下。
 
-把 `public/` 整个上传。没有构建产物需要生成。
+**体积**：L1 会按 256 KiB 自动分块，多大的站点都能发。分块协议要求把交易先报上去、再逐块补内容，这些程序自己处理。
 
-- **Arweave / IPFS**：上传目录并生成 path manifest，用 manifest 的 tx id / CID 访问
-- **Cloudflare Pages / EdgeOne**：绑定仓库或上传目录
-- **nginx**：`root` 指到 `public/`
+**费用**：Arweave 是永久存储，按体积一次性付费。Turbo 有免费额度（约单项 105 KiB、终身 10 MiB），小项目通常够用，超出部分要充值。具体额度以官方页面为准。L1 不经服务，直接付给网络。
+
+### 从链上恢复
+
+```
+rog publish <站点> --arweave --from <入口id> [--repo <名字>] [--gateway <地址>]
+```
+
+发布记录本身也会随站点上链。换机器、本地 `.rog` 丢了之后，用入口 id 把它取回来，增量能力就续上了，不必从零重传。
+
+`--gateway` 用来指定读取用的网关，默认 `arweave.net`。
+
+### 检查与补传
+
+```
+rog verify <站点目录> [--repo 名字] [--gateway 地址…] [--from 入口id] [--no-content] [--repair]
+```
+
+发布之后的手动核对：拿发布记录逐条问网关「这条还在不在、内容对不对」。
+**只读、只报告，不做任何自动动作**——连修复都是单独一个开关。
+
+| 选项 | 默认 | 说明 |
+|---|---|---|
+| `--repo` | 站点目录名 | 记录身份，与发布时一致 |
+| `--gateway` | 内置清单全查 | 用哪个网关查，可重复给多个，多网关对比 |
+| `--from` | 本地记录 | 从链上取一份记录来核对（换机器后用） |
+| `--no-content` | 关（默认核对） | 只查可读性，不取内容比对摘要 |
+| `--repair` | 关 | 把坏引用从记录里清掉，清完跑一次发布即补上 |
+
+结论分四档：**可读**（一个网关读到且内容对就算成功）、**查不到**
+（能问到的网关都说 404）、**摘要不符**（读到的网关内容全对不上）、
+**网关不可达**（连不上，问不出结论）。个别网关读不到、或回了怪东西，
+只记在备注里（汇总报「其中 N 条网关有差异」）：链上数据在链上即永久，
+不影响「上传成功」这个事实。
+
+`--repair` 只清**查不到**与**摘要不符**这两类；网关不可达不清——
+网络问题不该让已付费的内容重传。
+
+补传的机制就是增量发布：坏引用从记录里清掉后，下次发布会重新签名、
+重新上传这些文件。verify 不碰上传，也就没有第二条上传路径的流程风险。
+webui 里有对应的「检查与补传」面板，网关、代理、摘要核对都能手动设。
+
+### 探测网关
+
+```
+rog nodes [地址…] [--proxy system|manual|off] [--proxy-url <地址>]
+```
+
+发布前花两秒看清出口：并发探一遍各网关的 `/info`，报高度、队列与延迟，
+建议当前该把 `--node` 填谁。只读、不花 AR、失败不留痕。
+提交时「看似成功、实则没到场」的事，多半就出在网关这一跳。
+
+### 图形界面
+
+```
+rog webui [--site <站点目录>] [--port <端口>]
+```
+
+| 选项 | 默认 | 说明 |
+|---|---|---|
+| `--site <目录>` | `public` | 默认操作的站点目录 |
+| `--port <端口>` | 随机空闲端口 | 固定端口，方便反复访问同一个地址 |
+
+把打包、发布、检查与补传、从链上恢复、站点文件浏览与替换都摆在页面上，
+功能与命令行一致。左栏是面包屑切换卡片：五个操作一次只亮一张，
+默认停在发布；网络出口是常驻条，发布/检查/恢复共用。耗时操作会开一个
+任务，进度用 SSE 实时推，刷新页面也不丢。
+
+服务只绑 `127.0.0.1`，并且启动时生成一个随机会话 token：地址栏里带着它，页面内所有请求也跟着带，不带或不对一律拒绝。这样即使同机有别的网页，也没法借你的浏览器去改站点文件。webui 只操作启动时 `--site` 指定的那个目录，请求里想换根一律拒绝。
 
 ## 界面
 
@@ -160,7 +311,7 @@ node scripts/serve.mjs <根目录> <端口>
 
 ### 换肤
 
-可调项都收在 `public/src/style.css` 顶部的 CSS 变量里：
+可调项都收在 `internal/sitekit/site/src/style.css` 顶部的 CSS 变量里：
 
 ```css
 :root {
@@ -176,7 +327,7 @@ node scripts/serve.mjs <根目录> <端口>
 }
 ```
 
-深色模式跟随系统，也可以用 `<html data-theme="dark">` 强制。改结构或文案动 `public/src/views.js`。
+深色模式跟随系统，也可以用 `<html data-theme="dark">` 强制。改结构或文案动 `internal/sitekit/site/src/views.js`。
 
 ## 技术说明
 
@@ -186,14 +337,24 @@ node scripts/serve.mjs <根目录> <端口>
 
 解法是用 pack index 的偏移表反推边界：所有对象偏移排序后，某个对象的字节区间就是 `[自身偏移, 下一个偏移)`，切出来刚好是完整压缩数据。所以 `.idx` 是必需件。
 
+### 分块的切法从哪来
+
+L1 发布大站点时要算 Merkle 树，而交易签名绑定的 `data_root` 就来自那棵树。
+
+这里的做法是：`data_root` 与各块的 proof 都交给签名页里的 arweave-js 算，Go 侧只按回传的 `offset` 推每块边界，再逐块提交。这样签名的依据与提交的依据天然是同一份，不存在两个实现算不到一块去的可能。
+
+有个细节值得记：恰好等于单块上限（256 KiB）的数据只有一块要传，但它的 proof 比预期长。原因是切块时先切出一个零长度尾块、树按含它的形状建好，之后才把空块丢掉。所以自己照规则重切一遍反而容易错，直接认 offset 最稳。
+
+`scripts/arjs-vectors.cjs` 能把 arweave-js 的输出固化成对照数据，测试里会拿它比对。
+
 ### 模块
 
 ```
-public/src/git/
-  zlib.js      解压封装
+internal/sitekit/site/src/git/
+  zlib.js      解压封装（输出限长，炸弹截停）
   idx.js       pack index v2 解析
-  pack.js      pack 读取、delta 递归
-  delta.js     delta 指令解码
+  pack.js      pack 读取、delta 递归（环与深度上限）
+  delta.js     delta 指令解码（声明大小上限）
   objects.js   commit / tree / tag 结构
   repo.js      仓库门面：refs / tree / blob / log
 ```
@@ -207,35 +368,80 @@ node scripts/selftest.mjs <裸仓库目录>     # 或指定一个现成的
 
 它会走一遍 pack 加载、refs 解析、tree 递归、blob 解压、提交历史。
 
+### 界面代码放哪
+
+前端骨架的真身在 `internal/sitekit/site/`，`go:embed` 把它嵌进二进制。
+选这个位置是被约束逼出来的：`go:embed` 只能嵌本包目录下的文件，
+而复制一份进包会让两份代码长期漂移。
+
+`public/` 是**产物目录**：骨架、裸仓库、清单都由工具生成，不进版本库。
+要看效果就跑 `rog site init` 铺一份出来。
+
+## 信任模型
+
+这个工具是单人管理员工具，安全边界按「你信任谁」来看：
+
+- **webui 与签名服务的 token 就是管理员权限**。持 token 者可改站点文件、
+  发起发布与交易。两个服务都只绑 `127.0.0.1`，token 每次启动随机生成，
+  不要外传地址栏里的那串 token。
+- **`--from`、`--gateway`、`--endpoint`、`--node` 是信任决策**。
+  入口 id 指向谁、网关指向谁，增量复用与恢复就信谁返回的内容。
+  Arweave 的 id 是签名哈希不是内容哈希，工具无法按 id 反验内容；
+  恶意网关可以返回任意字节。只用你信得过的入口与网关。
+- **不要 pack 不可信来源的仓库**。`file://` 源会在源仓库自己的 git 配置下
+  运行 `git-upload-pack`，恶意仓库可在配置里指 `uploadpack.packObjectsHook`
+  之类触发命令。把不可信仓库当数据看这个前提，被 git 自己的语义打破了。
+- 前端解析器对恶意 pack 做了防御（delta 环、声明大小、解压膨胀都有上限），
+  打挂标签页这类事不会再发生；但解析器不会替你判断仓库内容是否可信。
+
 ## 已知限制
 
 - **只读**。协议层面没有 push 路径，这正是它能用纯静态文件托管的原因
-- **源仓库不能是浅克隆**。`git clone --depth` 拉下来的历史不完整，`repack` 遍历父提交时会失败。脚本会提前拦住并提示 `fetch --unshallow`
+- **源仓库不能是浅克隆**。`git clone --depth` 拉下来的历史不完整，`repack` 遍历父提交时会失败。程序会提前拦住并提示 `fetch --unshallow`
 - **整包下载**。packfile 一次性载入内存，几十 MB 会卡。要优化得解析 `.idx` 后按 Range 惰性取对象
 - **不支持 shallow clone**。`--depth` 依赖服务端裁剪历史
 - **不能选择性公开**。`info/refs` 列出仓库里所有 refs，不想公开的分支要在打包前清掉
-- **平台可能拦 `.git` 路径**。带 WAF 的托管会挡 `/.git/` 前缀，部署后先 curl 一下 `xxx.git/info/refs` 确认。被拦就把目录改名成 `xxx.repo` 之类，clone 地址相应变化（git 不要求 URL 以 `.git` 结尾）
+- **目录名不带 `.git`**，这是刻意的。git 对 URL 后缀没有要求，而带 `.git` 的路径会被一些网关拦掉（`eth.limo` 就是一例）。产物目录直接用仓库名，`git clone <站点>/demo` 即可。
+- **ENS contenthash 要手动填**。发完在 ENS 应用里把入口写成 `ar://<入口id>`，这一步尚未自动化
 
 ## 目录
 
 ```
-public/                    部署根，整个上传
-  index.html               入口
-  repository.json          仓库清单（由脚本维护）
-  src/
-    main.js                启动与路由分发
-    router.js              hash 路由
-    store.js               repository.json 与仓库缓存
-    views.js               各视图渲染
-    ui.js                  DOM 构造与小工具
-    markdown.js            极简 Markdown 渲染（已做 HTML 转义）
-    style.css              主题层
-    git/                   只读 git 解析器
+main.go                    命令行入口：site / pack / publish / webui
+internal/repopack/         打包：全量、增量、ref 对齐、文件锁
+internal/publish/          发布抽象、本地目标、发布记录、进程内互斥
+internal/arweave/          Turbo 与 L1 两条路：上传、bundle、分块、manifest
+internal/signer/           本机签名服务与内嵌签名页（含 arweave-js）
+internal/webui/            维护台：任务、接口、内嵌页面
+internal/sitekit/          嵌在二进制里的前端骨架
+  site/                    骨架真身，改前端就在这里
+    index.html             入口
+    repository.json        空清单，pack 会覆盖成真的
+    src/
+      main.js              启动与路由分发
+      router.js            hash 路由
+      store.js             repository.json 与仓库缓存
+      views.js             各视图渲染
+      ui.js                DOM 构造与小工具
+      icons.js             手绘 SVG 图标库
+      markdown.js          极简 Markdown 渲染（转义 + 表格 + 折叠块）
+      style.css            主题层
+      git/                 只读 git 解析器
+public/                    部署根（产物目录，由工具生成）
 scripts/                   不参与部署
-  prepare-repo.py          生成可托管的裸仓库
-  serve.mjs                本地静态服务器
+  serve.mjs                本地静态服务器，默认服务骨架真身
   selftest.mjs             解析器自测
-  probe.mjs                环境探测
+  arjs-*.cjs               与 arweave-js 对拍/取证的工具集（形状、基准、探针等）
 ```
 
-改外观只动 `public/src/style.css`，改结构或文案动 `public/src/views.js`。
+## 构建
+
+```bash
+go build -o rog .
+```
+
+没有第三方依赖，用一个标准库足够。站点前端的改动要重新 `go build`（骨架是
+`go:embed` 编译期固化的），再 `rog site init <站点> --force` 刷给已有站点；
+直接改产物目录里的 `public/` 也能生效，但下次刷新会被模板盖掉。
+
+改外观只动 `internal/sitekit/site/src/style.css`，改结构或文案动 `internal/sitekit/site/src/views.js`。

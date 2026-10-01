@@ -1,0 +1,1546 @@
+package webui
+
+import "net/http"
+
+// DefaultPage 是 webui 的单页界面。
+//
+// 零依赖、内嵌，不联网加载任何资源。风格沿用签名页：系统字体、细边框、
+// 中性色。目标是实用，不做动画与主题切换。
+//
+// 一条纪律：界面不缓存文件状态。任何写操作完成后重新拉 /api/state，
+// 因为管理员可能绕过界面直接改目录，界面必须如实反映磁盘。
+const DefaultPage = `<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>read-only-git · 维护台</title>
+<style>
+  /* 颜色全部走变量：深色模式只改这一组值。
+     之前把颜色硬编码在各处，深色只覆盖了一部分，就会出现「字变白了、
+     输入框底还是白的」这种事。 */
+  :root {
+    color-scheme: light dark;
+
+    --bg: #f6f7f9;
+    --fg: #1f2328;
+    --panel: #ffffff;
+    --border: #d0d7de;
+    --border-soft: #eaeef2;
+    --muted: #656d76;
+    --field-bg: #ffffff;
+    --field-border: #d0d7de;
+    --chip: #eaeef2;
+    --btn: #f6f8fa;
+    --btn-hover: #eef1f4;
+    --link: #0969da;
+    --ok: #1a7f37;
+    --err: #cf222e;
+    --warn: #9a6700;
+    --accent: #1f883d;
+    --accent-strong: #1a7f37;
+    --on-accent: #ffffff;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0d1117;
+      --fg: #e6edf3;
+      --panel: #161b22;
+      --border: #30363d;
+      --border-soft: #21262d;
+      --muted: #8b949e;
+      --field-bg: #0d1117;
+      --field-border: #30363d;
+      --chip: #21262d;
+      --btn: #21262d;
+      --btn-hover: #30363d;
+      --link: #4493f8;
+      --ok: #3fb950;
+      --err: #f85149;
+      --warn: #d29922;
+      --accent: #238636;
+      --accent-strong: #2ea043;
+      --on-accent: #ffffff;
+    }
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    font: 14px/1.6 system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    margin: 0; padding: 0 0 40px; background: var(--bg); color: var(--fg);
+  }
+  header {
+    padding: 14px 20px; border-bottom: 1px solid var(--border); display: flex;
+    align-items: baseline; gap: 12px; flex-wrap: wrap;
+  }
+  header h1 { font-size: 16px; margin: 0; }
+  .muted { color: var(--muted); font-size: 13px; }
+  main { display: grid; grid-template-columns: minmax(380px, 460px) minmax(0, 1fr); gap: 16px; padding: 16px 20px; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  .panel {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
+    padding: 12px 14px; margin-bottom: 14px;
+  }
+  .panel h2 { font-size: 13px; margin: 0 0 10px; letter-spacing: .02em; }
+
+  /* 左栏是面包屑切换卡片：一行流程导航，下面一次只亮一张卡 */
+  .flowbar {
+    display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+    margin: 0 0 12px; font-size: 13px;
+  }
+  .flowbar a {
+    cursor: pointer; padding: 4px 10px; border: 1px solid var(--border);
+    border-radius: 14px; background: var(--btn); color: var(--fg);
+    text-decoration: none; white-space: nowrap;
+  }
+  .flowbar a:hover { background: var(--btn-hover); }
+  .flowbar a.active {
+    background: var(--accent); border-color: var(--accent-strong);
+    color: var(--on-accent); font-weight: 600;
+  }
+  .flowbar .sep { color: var(--muted); }
+
+  /* 网络出口是全局设置，常驻在面包屑下方，不跟着卡片切换藏起来 */
+  .netbar {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    margin: 0 0 12px; padding: 8px 12px;
+    border: 1px solid var(--border); border-radius: 6px;
+    background: var(--panel); font-size: 13px;
+  }
+  .netbar select { width: 150px; flex: none; }
+  .netbar input { flex: 1; min-width: 180px; }
+  .netbar .muted { white-space: nowrap; font-size: 12px; }
+
+  /* 显式声明：hidden 属性优先级最低，不写这条会被上面的样式顶掉（硬约束 8） */
+  .panel.step[hidden] { display: none; }
+  label { display: block; font-size: 12px; margin: 8px 0 3px; color: var(--muted); }
+  input, select {
+    width: 100%; padding: 6px 8px; font: inherit; font-size: 13px;
+    border: 1px solid var(--field-border); border-radius: 4px;
+    background: var(--field-bg); color: var(--fg);
+  }
+  textarea {
+    width: 100%; padding: 6px 8px; font: inherit; font-size: 13px;
+    border: 1px solid var(--field-border); border-radius: 4px;
+    background: var(--field-bg); color: var(--fg);
+    resize: vertical;
+  }
+  input::placeholder { color: var(--muted); opacity: .75; }
+
+  /* 检查结果：限高滚动，不让长列表把左栏拉成一条巨长的柱子 */
+  #verifyResult { max-height: 340px; overflow: auto; margin-top: 4px; }
+  #verifyResult table { border: 1px solid var(--border); border-radius: 4px; }
+  #verifyResult th, #verifyResult td { padding: 4px 8px; font-size: 12px; }
+  .vbadge {
+    display: inline-block; padding: 1px 8px; border-radius: 10px;
+    font-size: 11px; white-space: nowrap;
+    background: var(--chip);
+  }
+  .row { display: flex; gap: 8px; }
+  .row > * { flex: 1; }
+  button {
+    font: inherit; font-size: 13px; padding: 6px 12px; margin-top: 10px;
+    border: 1px solid var(--border); border-radius: 5px;
+    background: var(--btn); color: var(--fg); cursor: pointer;
+  }
+  button:hover { background: var(--btn-hover); }
+  button.primary { background: var(--accent); border-color: var(--accent-strong); color: var(--on-accent); }
+  button.primary:hover { background: var(--accent-strong); }
+  button:disabled { opacity: .55; cursor: default; }
+  .tabs { display: flex; gap: 4px; margin-bottom: 6px; }
+  .tabs button { flex: 1; margin-top: 0; }
+  .tabs button.active { background: var(--accent); border-color: var(--accent-strong); color: var(--on-accent); }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 5px 6px; border-bottom: 1px solid var(--border-soft); }
+  th { font-size: 12px; color: var(--muted); font-weight: 600; border-bottom-color: var(--border); }
+  td.mono, .mono { font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+
+  /* 文件面板：像资源管理器那样，一次只列一层。 */
+  .tree { font-size: 13px; border-top: 1px solid var(--border); }
+  .trow {
+    display: flex; align-items: center; gap: 6px; padding: 3px 6px;
+    border-bottom: 1px solid var(--border-soft);
+  }
+  .trow.dir, .trow.up { cursor: pointer; user-select: none; }
+  .trow.dir:hover, .trow.up:hover { background: var(--chip); }
+  .trow.sel { background: var(--chip); }
+  .twist { width: 10px; color: var(--muted); font-size: 10px; }
+  .tname { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tname.dirname { font-weight: 600; }
+  .tsize { width: 74px; text-align: right; color: var(--muted); font-size: 12px; }
+  .tdigest { width: 78px; color: var(--muted); font-family: ui-monospace, Consolas, monospace; font-size: 11px; }
+  .tact { width: 128px; text-align: right; white-space: nowrap; }
+  .tact button { margin: 0 0 0 4px; padding: 2px 8px; font-size: 12px; }
+  .tree.drop { outline: 2px dashed var(--accent); outline-offset: -2px; }
+  .crumbs { margin-bottom: 8px; font-size: 13px; line-height: 1.8; }
+  .crumbs a { text-decoration: none; }
+  .crumbs a:hover { text-decoration: underline; }
+  .filesbar { display: flex; gap: 6px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; }
+  .filesbar button { margin: 0; padding: 3px 10px; font-size: 12px; }
+  .filesbar .spacer { flex: 1; }
+  tr.drop { background: var(--chip); }
+  .chip {
+    display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 10px;
+    background: var(--chip); margin-left: 6px;
+  }
+  .logbox {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
+    margin: 0 20px; padding: 10px 12px; height: 220px; overflow: auto;
+    font-family: ui-monospace, Consolas, monospace; font-size: 12px; white-space: pre-wrap;
+    color: var(--fg);
+  }
+  .err { color: var(--err); }
+  .ok { color: var(--ok); }
+  .warn { color: var(--warn); }
+  a { color: var(--link); }
+  h2 { display: flex; align-items: center; justify-content: space-between; }
+</style>
+</head>
+<body>
+<header>
+  <h1>read-only-git 维护台</h1>
+  <span class="muted" id="sitePath">…</span>
+  <span class="muted" style="margin-left:12px">钱包 <b id="walletState">未连接</b></span>
+  <button id="connWallet" style="margin:0">连接钱包</button>
+  <button id="refresh" style="margin:0">重新扫描</button>
+</header>
+
+<main>
+  <div>
+    <div class="flowbar" id="flowbar">
+      <a data-step="scaffold">站点骨架</a><span class="sep">›</span>
+      <a data-step="pack">打包</a><span class="sep">›</span>
+      <a data-step="publish">发布</a><span class="sep">›</span>
+      <a data-step="verify">检查与补传</a><span class="sep">›</span>
+      <a data-step="restore">从链上恢复</a>
+    </div>
+
+    <div class="netbar">
+      <span class="muted">网络出口</span>
+      <select id="pubProxyMode">
+        <option value="system">跟随系统代理</option>
+        <option value="manual">手动指定</option>
+        <option value="off">不走代理</option>
+      </select>
+      <input id="pubProxyUrl" placeholder="http://127.0.0.1:7890">
+      <span class="muted">全局：发布、检查、恢复共用（打包拉远端的 git 代理在打包卡里另填）</span>
+    </div>
+
+    <section class="panel step" data-step="scaffold" id="scaffoldPanel">
+      <h2>站点骨架</h2>
+      <p class="muted" id="scaffoldHint" style="margin:0 0 8px">…</p>
+      <label>模板</label>
+      <select id="tplSelect"></select>
+      <label><input type="checkbox" id="tplOverwrite" style="width:auto"> 覆盖已存在的文件</label>
+      <button class="primary" id="doSiteInit">铺开骨架</button>
+    </section>
+
+    <section class="panel step" data-step="pack">
+      <h2>打包</h2>
+      <label>源仓库（本地路径，或远端地址）</label>
+      <input id="packSource" placeholder="D:\path\to\repo">
+      <div class="row">
+        <div>
+          <label>输出目录（站点根）</label>
+          <input id="packOut" placeholder="public" value="public">
+        </div>
+        <div>
+          <label>仓库名（留空则从源推导）</label>
+          <input id="packName" placeholder="myrepo">
+        </div>
+      </div>
+      <label>远端源代理（可选，拉远端仓库时用）</label>
+      <input id="packProxy" placeholder="http://127.0.0.1:7890">
+      <label><input type="checkbox" id="packRebuild" style="width:auto"> 完整重打包（忽略已有产物，从零重建）</label>
+      <p class="muted" style="margin:4px 0 0">默认自动：站点里已有这个仓库就做增量，只传变化的文件。</p>
+      <button class="primary" id="doPack">开始打包</button>
+    </section>
+
+    <section class="panel step" data-step="publish">
+      <h2>发布</h2>
+      <div class="tabs" id="targetTabs">
+        <button data-target="local">本地目录</button>
+        <button data-target="turbo" class="active">Turbo</button>
+        <button data-target="l1">L1</button>
+      </div>
+      <div id="destLocal" hidden>
+        <label>目标目录</label>
+        <input id="pubDest" placeholder="D:\path\to\out">
+      </div>
+      <div id="destTurbo">
+        <label>上传服务</label>
+        <input id="pubEndpoint" placeholder="https://turbo.ardrive.io">
+      </div>
+      <div id="destL1" hidden>
+        <label>节点</label>
+        <input id="pubNode" list="nodeList" placeholder="https://arweave.net">
+        <datalist id="nodeList">
+          <option value="https://arweave.net"></option>
+          <option value="https://ardrive.net"></option>
+          <option value="https://permagate.io"></option>
+        </datalist>
+        <p class="muted" style="margin:0">交易先交给网关、再由它转给节点，这一跳不通就会「看似成功、实则没到场」。上面这几个都是能应答的，也可以用 <code>rog nodes</code> 现场探一下哪个快。</p>
+      </div>
+      <p class="muted" style="margin:0">仓库名取站点目录名，不用填。增量靠 .rog/ 里的发布记录自动续上。</p>
+      <button class="primary" id="doPublish">开始发布</button>
+    </section>
+
+    <section class="panel step" data-step="verify" id="verifyPanel">
+      <h2>检查与补传</h2>
+      <p class="muted" style="margin:0 0 8px">核对上次发布在链上还能不能读到。只读、只报告；清理坏引用是单独一步，清完跑一次发布即补上，不会自动发布。</p>
+      <label>网关（可填多个，逗号或换行分隔；留空用内置清单全查）</label>
+      <textarea id="verifyGateways" rows="2" placeholder="https://arweave.net, https://permagate.io"></textarea>
+      <div class="row">
+        <div>
+          <label>从入口 id 取记录（可选，留空用本地记录）</label>
+          <input id="verifyFrom" placeholder="re22tX-…">
+        </div>
+      </div>
+      <label><input type="checkbox" id="verifyContent" style="width:auto" checked> 核对内容摘要（慢但准）</label>
+      <p class="muted" style="margin:0">网络出口用顶部那条全局设置。</p>
+      <button class="primary" id="doVerify">开始检查</button>
+      <button id="doVerifyRepair">清理坏引用</button>
+      <div id="verifyResult"></div>
+    </section>
+
+    <section class="panel step" data-step="restore" id="restorePanel">
+      <h2>从链上恢复</h2>
+      <p class="muted" style="margin:0 0 8px">按入口 id 把站点内容取回到一个空目录。与发布是两件事：发布是往外写，这个是往本地拿回来。</p>
+      <label>入口 id</label>
+      <input id="restoreEntry" placeholder="re22tX-…">
+      <label>恢复到目录（必须是空目录）</label>
+      <input id="restoreDest" placeholder="D:\path\to\empty-dir">
+      <p class="muted" style="margin:0 0 8px" id="restoreHint">目录里已经有东西时会直接报错，不会覆盖、也不会替你清空。</p>
+      <label>网关</label>
+      <input id="restoreGateway" placeholder="https://arweave.net">
+      <button class="primary" id="doRestore">开始恢复</button>
+    </section>
+
+  </div>
+
+  <div>
+    <section class="panel">
+      <h2>
+        <span>站点文件</span>
+        <span class="muted" id="fileSummary"></span>
+      </h2>
+      <p class="muted" style="margin:0 0 8px">像资源管理器一样逐层进入。把文件或整个目录拖进面板，就落在当前目录里；同名的会先问一次。</p>
+      <div class="filesbar">
+        <button id="fileUp">上一层</button>
+        <button id="fileCopy">复制选中</button>
+        <button id="filePaste">粘贴</button>
+        <button id="fileMkdir">新建文件夹</button>
+        <span class="spacer"></span>
+        <span class="muted" id="clipInfo"></span>
+      </div>
+      <div class="crumbs" id="crumbs"></div>
+      <div class="tree" id="files"></div>
+    </section>
+
+    <section class="panel">
+      <h2>记录</h2>
+      <table>
+        <thead><tr><th>记录</th><th>目标</th><th>引用</th><th>更新时间</th></tr></thead>
+        <tbody id="records"></tbody>
+      </table>
+    </section>
+  </div>
+</main>
+
+<footer style="padding:8px 16px">
+  <span class="muted" id="footInfo"></span>
+</footer>
+
+<div class="logbox" id="logs">task 日志会显示在这里。</div>
+
+<script src="/sign/vendor/arweave.js"></script>
+<script>
+(function () {
+  var site = '';
+  var activeTarget = 'turbo';
+
+  // token 从地址栏取，所有请求都带上它。
+  // 服务只绑本机，但同机的任意网页都能向它发请求，靠这一层挡住别的页面。
+  var TOKEN = new URLSearchParams(location.search).get('token') || '';
+
+  function api(path, opts) {
+    var o = Object.assign({}, opts || {});
+    o.headers = Object.assign({}, o.headers || {}, { 'X-Rog-Token': TOKEN });
+    return fetch(path, o);
+  }
+
+  function el(id) { return document.getElementById(id); }
+
+  function fmtSize(n) {
+    if (n < 1024) return n + ' B';
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KiB';
+    return (n / 1024 / 1024).toFixed(2) + ' MiB';
+  }
+
+  function log(line, cls) {
+    var box = el('logs');
+    var span = document.createElement('div');
+    if (cls) span.className = cls;
+    span.textContent = line;
+    box.appendChild(span);
+    box.scrollTop = box.scrollHeight;
+  }
+
+  // 当前任务 id。note 要拿它把消息回传给后端。
+  var currentTaskId = '';
+
+  // note 把一条消息同时写到界面与任务日志。
+  //
+  // 为什么要回传：日志文件只收后端的 Logf，而像「签名失败：…」
+  // 这种话是前端写的。不回传的话，出了事翻日志，
+  // 最关键的那句偏偏不在——实测就是如此。
+  //
+  // 只用在关键处（失败、警告、阶段性结果）。逐条回传「已签名 N 个」
+  // 会把日志刷得看不清东西。
+  function note(line, cls) {
+    log(line, cls);
+    if (!currentTaskId) return;
+    api('/api/task/' + currentTaskId + '/note', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ line: line }),
+    }).catch(function () { /* 记日志失败不该影响正事 */ });
+  }
+
+  function clearLog() { el('logs').textContent = ''; }
+
+  // 站点骨架：把内嵌的前端模板写到站点目录。
+  // 只有一个 exe 时靠它把站点立起来。
+  function renderScaffold(st) {
+    var sc = st.scaffold || {};
+    var tpls = sc.templates || [];
+    var sel = el('tplSelect');
+
+    // 只在列表变化时重建，否则每次刷新都会把用户选的模板冲掉
+    var ids = tpls.map(function (t) { return t.id; }).join(',');
+    if (sel.dataset.ids !== ids) {
+      sel.textContent = '';
+      tpls.forEach(function (t) {
+        var opt = document.createElement('option');
+        opt.value = t.id;
+        opt.textContent = t.name + '（' + t.files + ' 个文件）';
+        sel.appendChild(opt);
+      });
+      sel.dataset.ids = ids;
+    }
+
+    var missing = sc.missing || 0;
+    var total = sc.total || 0;
+    var hint = el('scaffoldHint');
+
+    if (!st.exists) {
+      hint.textContent = '站点目录还不存在，铺开骨架会把它一并建好（' + total + ' 个文件）。';
+      hint.className = 'muted';
+    } else if (missing > 0) {
+      hint.textContent = '还缺 ' + missing + ' / ' + total + ' 个骨架文件，界面现在打不开。';
+      hint.className = 'warn';
+    } else {
+      hint.textContent = '骨架完整（' + total + ' 个文件）。';
+      hint.className = 'muted';
+    }
+  }
+
+  // 拉一次状态并重画。任何写操作之后都要调用它，不做乐观更新。
+  // ---- 钱包签名 ----
+  //
+  // 发布到 Arweave 时，Go 侧把待签的内容摆在 /sign/ 下等着，
+  // 这里取出来交给钱包、把结果送回去。
+  // 与 CLI 那条路共用同一套端点，只是页面换成了当前这个。
+
+  function wallet() { return window.arweaveWallet; }
+
+  function delay(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+  // 钱包扩展是异步注入 window.arweaveWallet 的，可能晚于本脚本执行
+  function waitForWallet(ms) {
+    return new Promise(function (resolve, reject) {
+      var deadline = Date.now() + ms;
+      (function poll() {
+        if (wallet()) return resolve(wallet());
+        if (Date.now() > deadline) return reject(new Error('没检测到 Arweave 钱包扩展'));
+        setTimeout(poll, 150);
+      })();
+    });
+  }
+
+  // 价格交给 arweave-js 去问节点：不设 reward，它就会调
+  // /price/<这一包的字节数>（见 arweave-js common.js 的 createTransaction）。
+  //
+  // 这里曾经写过乘 2。那是排查「交易上了链、网关却打不开」时
+  // 为了排除变量加的，真因最后落在 bundle 缺少 ANS-104 头部
+  // （见 arweave/bundle.go），与手续费无关——所以乘 2 只是多花钱。
+  //
+  // 按节点报价付就够，依据是节点自己的校验：is_tx_fee_sufficient
+  // 要求 reward >= get_tx_fee(...)，而 /price 返回的就是 get_tx_fee 的结果，
+  // 两者同源。ArDrive 的做法也是这个：它的 FeeMultiple 默认值就是 1.0，
+  // 也就是「照报价付」。
+  //
+  // 一个已知例外：从未发过交易的地址还要多付一笔 NewAccountFee
+  // （ar_tx:get_tx_fee2 里的那个分支），而 /price/<size> 不含它。
+  // 首次发布若被拒，原因在这里，不在价格高低。
+
+  // 让钱包签一笔「data 就是这一整包」的交易，然后自己提交上链。
+  //
+  // 为什么提交也放在这里：署名用的对象与提交出去的对象是同一个，
+  // 就不存在「两处各自拼出来的交易 JSON 是否等价」这个问题。
+  // 之前是 Go 那边拿回字段自己拼 JSON 再提交，一旦有哪一项对不上，
+  // 节点只会回一句 verification failed，很难查。
+  //
+  // 中间那一次 verify 也是这个用意：先把「签名本身对不对」
+  // 与「提交环节对不对」分开，出错时才能知道是哪一头。
+  async function signAndUploadBundle(buf, tags) {
+    if (!window.Arweave) throw new Error('arweave-js 没加载出来');
+    var arweave = window.Arweave.init({ host: 'arweave.net', port: 443, protocol: 'https' });
+
+    var tx = await arweave.createTransaction({ data: new Uint8Array(buf) });
+    var list = tags || [];
+    for (var i = 0; i < list.length; i++) {
+      tx.addTag(list[i].name, list[i].value);
+    }
+    // 不设 reward，createTransaction 会去问 /price/<字节数>，照报价付。
+    // 省略 JWK 参数时 arweave-js 会走注入的钱包
+    await arweave.transactions.sign(tx);
+
+    // 自验：签名与签名输入对不对得上。不过就说明钱包给的东西有问题，
+    // 这一步能把它与「提交环节的问题」当场分开。
+    var ok = false;
+    try { ok = await arweave.transactions.verify(tx); } catch (e) { ok = false; }
+    if (!ok) {
+      throw new Error('签名自验没过：钱包返回的 owner / signature 与这笔交易的签名输入对不上');
+    }
+
+    // 提交。
+    //
+    // 单块：自己 POST，能看见节点回的每一句话。
+    // 多块：不在这里提交，把 proofs 回传给 Go，由它走 /tx → 逐块 /chunk。
+    //
+    // 为什么多块不自己上：arweave-js 的 upload() 不暴露响应体，
+    // 实测栽过的正是「upload 说成功、链上却查不到」，出了事一点线索都看不到。
+    // Go 那条路每一步都写日志、失败会退避重试、致命错会单独挑出来。
+    // proofs 与交易字段一起回传，切块与提交在同一处，不会各说各话。
+    var chunkCount = (tx.chunks && tx.chunks.chunks) ? tx.chunks.chunks.length : 1;
+
+    if (chunkCount <= 1) {
+      var postStatus = 0, postBody = '';
+      try {
+        var resp = await arweave.api.post('tx', tx);
+        postStatus = resp.status;
+        postBody = typeof resp.data === 'string' ? resp.data : JSON.stringify(resp.data);
+      } catch (e) {
+        postStatus = (e && e.response && e.response.status) || -1;
+        if (e && e.response && e.response.data) {
+          postBody = String(e.response.data);
+        } else {
+          postBody = (e && e.message) || String(e);
+        }
+      }
+      if (postStatus < 200 || postStatus >= 300) {
+        throw new Error('节点拒收交易（' + postStatus + '）：' + postBody.slice(0, 300));
+      }
+
+      // 等一会儿再查一次状态。
+      //
+      // 不要刚 POST 完就查：节点是异步收录的，那一刻问往往得到 404，
+      // 而这并不代表交易丢了。这里问不到也只记一笔，不当作失败：
+      // 真正的确认要等区块，那是几分钟之后的事。
+      await delay(3000);
+      var st = null;
+      try { st = await arweave.transactions.getStatus(tx.id); } catch (e) { st = null; }
+      var stStatus = 0;
+      if (st && typeof st === 'object' && 'status' in st) { stStatus = st.status; }
+
+      return JSON.stringify({
+        id: tx.id,
+        uploaded: true,
+        chunkCount: 1,
+        owner: tx.owner,
+        signature: tx.signature,
+        reward: tx.reward,
+        last_tx: tx.last_tx,
+        data_root: tx.data_root,
+        data_size: String(tx.data_size),
+        tags: tx.tags,
+        status: stStatus,
+        postStatus: postStatus,
+        postBody: String(postBody).slice(0, 500),
+      });
+    }
+
+    var proofs = [];
+    var prfs = (tx.chunks && tx.chunks.proofs) ? tx.chunks.proofs : [];
+    for (var pi = 0; pi < prfs.length; pi++) {
+      proofs.push({
+        data_path: arweave.utils.bufferTob64Url(prfs[pi].proof),
+        offset: String(prfs[pi].offset),
+      });
+    }
+    if (proofs.length === 0) {
+      throw new Error('这一包需要分块，却没拿到分块证明，没法交给 Go 提交');
+    }
+    return JSON.stringify({
+      id: tx.id,
+      uploaded: false,
+      chunkCount: chunkCount,
+      owner: tx.owner,
+      signature: tx.signature,
+      reward: tx.reward,
+      last_tx: tx.last_tx,
+      data_root: tx.data_root,
+      data_size: String(tx.data_size),
+      // tags 原样回传（签名时交易里的那份）：签名输入里的 tags 就是它，
+      // 提交出去的也必须是它。Go 另拿明文编码一份的话，
+      // 节点解码出的字节与签名输入不同，会被拒 Transaction verification failed。
+      tags: tx.tags,
+      proofs: proofs,
+    });
+  }
+
+  // base64url 编码，不带填充。
+  //
+  // 优先用 arweave-js 的；取不到就自己编一份，
+  // 免得因为一个工具函数让整条分块路径在某个版本上失效。
+  function toB64Url(bytes) {
+    var u = window.Arweave && window.Arweave.utils;
+    if (u && typeof u.bufferTob64Url === 'function') {
+      return u.bufferTob64Url(bytes);
+    }
+    var bin = '';
+    for (var i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  }
+
+  // 签名循环的停止标志。任务一结束就置上，循环自己退出，
+  // 免得多转几圈去问一个已经没人应答的端点。
+  var signStop = false;
+  var walletConnected = false;
+
+  function stopSigning() { signStop = true; }
+
+  async function connectWallet() {
+    log('正在等待钱包扩展…');
+    try {
+      var w = await waitForWallet(30000);
+      await w.connect(['ACCESS_ADDRESS', 'SIGNATURE', 'SIGN_TRANSACTION']);
+      walletConnected = true;
+      el('walletState').textContent = '已连接';
+      el('walletState').className = 'ok';
+      note('已连接钱包', 'ok');
+      return true;
+    } catch (e) {
+      var msg = e && e.message ? e.message : String(e);
+      walletConnected = false;
+      el('walletState').textContent = '未连接';
+      el('walletState').className = 'err';
+      log(msg + '。请安装并启用 Wander。', 'err');
+      return false;
+    }
+  }
+
+  // runSignLoop 反复问 /sign/api/next，把待签内容交给钱包。
+  async function runSignLoop() {
+    signStop = false;
+
+    // 没连过就先连。否则 signDataItem 会被钱包直接拒，
+    // 而用户看到的现象是「一直没有弹窗」，很难猜到是没授权。
+    if (!walletConnected) {
+      var ok = await connectWallet();
+      if (!ok) {
+        note('钱包没连上，签名无法开始', 'err');
+        return;
+      }
+    }
+
+    var n = 0;
+
+    while (!signStop) {
+      var task = null;
+      try {
+        var res = await api('/sign/api/next', { cache: 'no-store' });
+        task = await res.json();
+      } catch (e) {
+        // 端点暂时问不到，多半是任务刚收尾。稍后再试，
+        // 由 signStop 决定要不要继续。
+        await delay(400);
+        continue;
+      }
+
+      if (!task || !task.id) {
+        // 暂时没有待签内容，而不是结束了：后端是串行准备的，中间会有空窗
+        await delay(300);
+        continue;
+      }
+
+      try {
+        var blobRes = await api('/sign/api/blob/' + task.id);
+        if (!blobRes.ok) throw new Error('取内容失败：' + blobRes.status);
+        var buf = await blobRes.arrayBuffer();
+
+        // 两类任务的产物不同：
+        //   dataitem 回传签名字节
+        //   tx       回传交易的签名字段
+        // 另外，钱包的 signDataItem 只接受 string 或 Uint8Array，
+        // 直接递 ArrayBuffer 会被它内部的断言挡下。
+        var signed = task.kind === 'tx'
+          ? await signAndUploadBundle(buf, task.tags)
+          : await wallet().signDataItem({ data: new Uint8Array(buf), tags: task.tags });
+
+        await api('/sign/api/sign/' + task.id, { method: 'POST', body: signed });
+      } catch (e) {
+        note('签名失败：' + (e && e.message ? e.message : String(e)), 'err');
+        // 签名通道断了，后端会一直等签名等到超时：发布锁占着、按钮灰着。
+        // 直接取消任务，让一切当场恢复，重试干净。
+        if (currentTaskId) {
+          api('/api/task/' + currentTaskId + '/cancel', { method: 'POST' }).catch(function () {});
+        }
+        setBusy(false);
+        return;
+      }
+
+      n += 1;
+      log('已签名 ' + n + ' 个');
+    }
+  }
+
+  async function refresh() {
+    var res = await api('/api/state');
+    var st = await res.json();
+
+    site = st.site;
+    el('sitePath').textContent = st.site;
+
+    renderScaffold(st);
+
+    if (st.error) {
+      log(st.error, 'err');
+    }
+
+    // 查重名要用当前磁盘上的路径，在这里更新，refresh 之后就准了。
+    // 沿途的目录也算「已存在」：拖入一个同名的目录时要能发现。
+    allFiles = st.files || [];
+    currentPaths = {};
+    allFiles.forEach(function (f) {
+      currentPaths[f.path] = true;
+      var parts = f.path.split('/');
+      parts.pop();
+      var acc = '';
+      parts.forEach(function (p) {
+        acc = acc ? acc + '/' + p : p;
+        currentPaths[acc] = true;
+      });
+    });
+
+    // 当前目录可能是刚被删掉的，那就退回根，不然会停在一个不存在的地方
+    if (cwd && !currentPaths[cwd]) cwd = '';
+    renderFiles();
+
+    el('fileSummary').textContent = allFiles.length + ' 个文件 · ' + fmtSize(st.totalSize || 0);
+
+    // 把相对路径的基准显出来。界面上好几处能填相对路径（打包源、站点根、
+    // 恢复目标），而基准是 webui 的启动目录——不显示出来，用户就不知道
+    // 自己写的 'public' 指的是哪里。
+    if (el('restoreHint') && st.cwd) {
+      el('restoreHint').textContent =
+        '目录里已经有东西时会直接报错，不会覆盖、也不会替你清空。' +
+        '相对路径的基准是 webui 的启动目录：' + st.cwd;
+    }
+
+    // 底部常显两个路径：相对路径的基准、以及日志落在哪里。
+    // 日志的价值在「出事时找得到」，把位置写出来才谈得上找得到。
+    if (el('footInfo')) {
+      var bits = [];
+      if (st.cwd) bits.push('工作目录 ' + st.cwd);
+      if (st.logDir) bits.push('日志 ' + st.logDir);
+      el('footInfo').textContent = bits.join('　·　');
+    }
+
+    var rb = el('records');
+    rb.textContent = '';
+    (st.records || []).forEach(function (r) {
+      var tr = document.createElement('tr');
+      [r.file, r.target, String(r.count), r.updated].forEach(function (v) {
+        var td = document.createElement('td');
+        td.textContent = v;
+        tr.appendChild(td);
+      });
+      rb.appendChild(tr);
+    });
+    // 空表头挂着很怪，给一句占位
+    if (!(st.records || []).length) {
+      var tr = document.createElement('tr');
+      var td = document.createElement('td');
+      td.colSpan = 4;
+      td.className = 'muted';
+      td.textContent = '还没有发布记录。';
+      tr.appendChild(td);
+      rb.appendChild(tr);
+    }
+  }
+
+  // ---- 站点文件：逐层浏览 ----
+  //
+  // 一次只列一个目录，像资源管理器。之前把整棵树铺开，
+  // 文件一多就要在长列表里找，还不如一层层走。
+
+  var cwd = '';        // 当前目录（相对站点根），'' 是根
+  var allFiles = [];   // 最近一次拉到的扁平清单，用来算目录大小
+  var clip = [];       // 站点内的剪贴板
+  var selected = {};   // 被选中的路径
+
+  // childrenOf 取出某个目录的直接子项。
+  //
+  // 扁平清单里每个路径都带全部层级，这里按「当前前缀」切一层出来。
+  function childrenOf(files, dir) {
+    var prefix = dir ? dir + '/' : '';
+    var dirs = {};
+    var out = [];
+
+    files.forEach(function (f) {
+      if (prefix && f.path.indexOf(prefix) !== 0) return;
+      var rest = f.path.slice(prefix.length);
+      if (!rest) return;
+      var i = rest.indexOf('/');
+      if (i < 0) {
+        out.push({ type: 'file', name: rest, path: f.path, size: f.size, digest: f.digest });
+      } else {
+        dirs[rest.slice(0, i)] = true;
+      }
+    });
+
+    var dirList = Object.keys(dirs).sort().map(function (d) {
+      return { type: 'dir', name: d, path: prefix + d };
+    });
+    out.sort(function (a, b) { return a.name < b.name ? -1 : 1; });
+    return dirList.concat(out);
+  }
+
+  // dirStats 数一个目录里有多少文件、共多大。
+  function dirStats(dir) {
+    var prefix = dir + '/';
+    var n = 0, size = 0;
+    allFiles.forEach(function (f) {
+      if (f.path.indexOf(prefix) === 0) { n++; size += f.size; }
+    });
+    return { count: n, size: size };
+  }
+
+  function span(cls, text) {
+    var s = document.createElement('span');
+    if (cls) s.className = cls;
+    if (text !== undefined) s.textContent = text;
+    return s;
+  }
+
+  function enterDir(p) {
+    cwd = p || '';
+    selected = {};
+    renderFiles();
+  }
+
+  function renderCrumbs() {
+    var box = el('crumbs');
+    box.textContent = '';
+
+    var root = document.createElement('a');
+    root.href = 'javascript:void(0)';
+    root.textContent = '站点根';
+    root.onclick = function () { enterDir(''); };
+    box.appendChild(root);
+
+    var acc = '';
+    (cwd ? cwd.split('/') : []).forEach(function (part) {
+      acc = acc ? acc + '/' + part : part;
+      box.appendChild(span('muted', ' / '));
+      var a = document.createElement('a');
+      a.href = 'javascript:void(0)';
+      a.textContent = part;
+      var target = acc;
+      a.onclick = function () { enterDir(target); };
+      box.appendChild(a);
+    });
+  }
+
+  // actionCell 给一行拼出操作按钮。
+  //
+  // 目录与文件一样要能删、能复制：这是「轻量资源管理器」与
+  // 一张文件表的区别。
+  function actionCell(item) {
+    var act = span('tact');
+
+    var copy = document.createElement('button');
+    copy.textContent = '复制';
+    copy.onclick = function (e) {
+      e.stopPropagation();
+      clip = [item.path];
+      updateClipInfo();
+      log('已记下 ' + item.path + '，切到目标目录后点粘贴', 'ok');
+    };
+
+    var del = document.createElement('button');
+    del.textContent = '删除';
+    del.onclick = function (e) {
+      e.stopPropagation();
+      removeEntry(item);
+    };
+
+    act.appendChild(copy);
+    act.appendChild(del);
+    return act;
+  }
+
+  function fileRow(item) {
+    var row = document.createElement('div');
+    row.className = 'trow';
+    row.dataset.path = item.path;
+    if (selected[item.path]) row.classList.add('sel');
+
+    row.appendChild(span('twist', ''));
+    row.appendChild(span('tname mono', item.name));
+    row.appendChild(span('tsize', fmtSize(item.size)));
+    row.appendChild(span('tdigest', (item.digest || '').slice(0, 8)));
+    row.appendChild(actionCell(item));
+
+    row.onclick = function (e) {
+      if (e.target.tagName === 'BUTTON') return;
+      toggleSelect(item.path, row);
+    };
+    return row;
+  }
+
+  function dirRow(item) {
+    var row = document.createElement('div');
+    row.className = 'trow dir';
+    row.dataset.path = item.path;
+    if (selected[item.path]) row.classList.add('sel');
+
+    var st = dirStats(item.path);
+
+    row.appendChild(span('twist', '▸'));
+    row.appendChild(span('tname dirname mono', item.name + '/'));
+    row.appendChild(span('tsize', fmtSize(st.size)));
+    row.appendChild(span('tdigest', st.count + ' 个'));
+    row.appendChild(actionCell(item));
+
+    row.onclick = function (e) {
+      if (e.target.tagName === 'BUTTON') return;
+      enterDir(item.path);
+    };
+    return row;
+  }
+
+  function upRow() {
+    var row = document.createElement('div');
+    row.className = 'trow up';
+    row.appendChild(span('twist', '↑'));
+    row.appendChild(span('tname mono', '..'));
+    row.appendChild(span('tsize', ''));
+    row.appendChild(span('tdigest', ''));
+    row.appendChild(span('tact', ''));
+    row.onclick = function () {
+      var parts = cwd.split('/');
+      parts.pop();
+      enterDir(parts.join('/'));
+    };
+    return row;
+  }
+
+  function toggleSelect(p, row) {
+    if (selected[p]) {
+      delete selected[p];
+      row.classList.remove('sel');
+    } else {
+      selected[p] = true;
+      row.classList.add('sel');
+    }
+    updateClipInfo();
+  }
+
+  function updateClipInfo() {
+    var n = Object.keys(selected).length;
+    el('clipInfo').textContent = clip.length
+      ? ('已复制 ' + clip.length + ' 项' + (n ? '，选中 ' + n + ' 项' : ''))
+      : (n ? '选中 ' + n + ' 项' : '');
+  }
+
+  // renderFiles 重画当前目录。不拉 state：进出目录不改变磁盘。
+  function renderFiles() {
+    renderCrumbs();
+    var box = el('files');
+    box.textContent = '';
+
+    if (cwd) box.appendChild(upRow());
+
+    var kids = childrenOf(allFiles, cwd);
+    if (!kids.length) {
+      var empty = document.createElement('div');
+      empty.className = 'trow';
+      empty.appendChild(span('twist', ''));
+      empty.appendChild(span('tname muted', cwd ? '这个目录是空的，把文件拖进来。' : '站点里还没有文件。'));
+      box.appendChild(empty);
+    } else {
+      kids.forEach(function (k) {
+        box.appendChild(k.type === 'dir' ? dirRow(k) : fileRow(k));
+      });
+    }
+
+    el('fileUp').disabled = !cwd;
+    updateClipInfo();
+  }
+
+  // ---- 文件操作 ----
+
+  // removeEntry 删一个文件或整个目录。
+  // 删除不可撤销，所以先说清楚要删什么，目录还要点名「及其中的全部内容」。
+  async function removeEntry(item) {
+    var what = item.type === 'dir'
+      ? '目录 ' + item.path + ' 及其中的全部内容'
+      : item.path;
+    if (!confirm('删除 ' + what + '？\n\n这个动作不能撤销。')) return;
+
+    var res = await api('/api/files/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ site: site, path: item.path }),
+    });
+    var out = await res.json();
+    if (!res.ok) { log('删除失败：' + (out.error || res.status), 'err'); return; }
+    log('已删除 ' + item.path, 'ok');
+
+    // 删掉的正是当前目录或它的祖先时，退到根，不然会停在一个不存在的地方
+    if (cwd === item.path || cwd.indexOf(item.path + '/') === 0) cwd = '';
+    refresh();
+  }
+
+  function copySelected() {
+    var picks = Object.keys(selected);
+    if (!picks.length) { log('先点一行选中它', 'warn'); return; }
+    clip = picks.slice();
+    updateClipInfo();
+    log('已记下 ' + clip.length + ' 项，切到目标目录后点粘贴', 'ok');
+  }
+
+  // pasteClip 把剪贴板里的东西复制到当前目录。
+  //
+  // 同名时先问一次，与拖入同一套规矩：重不重名是拖入/粘贴时
+  // 真正要判断的事，而不是「落在哪一行上」。
+  async function pasteClip() {
+    if (!clip.length) { log('剪贴板是空的：先点某一行的「复制」', 'warn'); return; }
+
+    var targets = clip.map(function (p) {
+      var name = p.split('/').pop();
+      return cwd ? cwd + '/' + name : name;
+    });
+    var clashes = targets.filter(function (t) { return currentPaths[t]; });
+    if (clashes.length) {
+      if (!confirm('目标目录里已有 ' + clashes.length + ' 个同名项：' + clashes.slice(0, 3).join('、') +
+        '\n\n确定 = 覆盖它们；取消 = 放弃这次粘贴。')) {
+        log('已取消粘贴', 'warn');
+        return;
+      }
+    }
+
+    var res = await api('/api/files/copy', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ site: site, from: clip, to: cwd }),
+    });
+    var out = await res.json();
+    if (!res.ok) { log('粘贴失败：' + (out.error || res.status), 'err'); return; }
+
+    var ok = 0, bad = [];
+    (out.results || []).forEach(function (r) {
+      if (r.error) bad.push(r.path + '（' + r.error + '）'); else ok++;
+    });
+    if (ok) log('已粘贴 ' + ok + ' 项', 'ok');
+    if (bad.length) log('有 ' + bad.length + ' 项没成：\n  ' + bad.join('\n  '), 'err');
+    refresh();
+  }
+
+  async function newFolder() {
+    var name = prompt('新文件夹的名字');
+    if (name === null) return;
+    name = name.trim();
+    if (!name) return;
+    if (name.indexOf('/') >= 0 || name.indexOf('\\') >= 0) {
+      log('名字里不能带路径分隔符', 'err');
+      return;
+    }
+    var p = cwd ? cwd + '/' + name : name;
+
+    var res = await api('/api/files/mkdir', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ site: site, path: p }),
+    });
+    var out = await res.json();
+    if (!res.ok) { log('新建失败：' + (out.error || res.status), 'err'); return; }
+    log('已新建 ' + p, 'ok');
+    refresh();
+  }
+
+  // 拖放。落点按拖到哪决定：
+  //
+  //   拖到文件行   → 替换该文件
+  //   拖到目录行   → 落到该目录下，各按自己的相对路径
+  //   拖到面板空白 → 落到站点根
+  //
+  // 重名不逐个问：拖二十个文件会弹二十次窗。收集齐之后统一问一次，
+  // 确定 = 替换这一批里的重名，取消 = 跳过它们、只写新文件。
+
+  // 当前磁盘上的路径集合，用来查重名。renderFiles 时更新。
+  var currentPaths = {};
+
+  // collectDrops 把一次拖放里的东西收成 [{rel, file}]。
+  //
+  // 走 webkitGetAsEntry：拖目录时 dataTransfer.files 是空的，
+  // 只有它能把目录递归展开。拿不到时退化成平铺的文件清单，
+  // 那种情况下没有目录结构可用，只能按文件名落位。
+  async function collectDrops(dt) {
+    var out = [];
+    var items = dt.items;
+
+    if (!items || !items.length) {
+      Array.prototype.forEach.call(dt.files || [], function (f) {
+        out.push({ rel: f.name, file: f });
+      });
+      return out;
+    }
+
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].kind !== 'file') continue;
+      var entry = items[i].webkitGetAsEntry && items[i].webkitGetAsEntry();
+      if (entry) {
+        if (entry.isDirectory) {
+          // 最外层目录的名字不保留：它叫什么由落点决定，
+          // 它内部的层级关系才是要带过去的。
+          await readDirInto(entry, '', out);
+        } else {
+          await walkEntry(entry, '', out);
+        }
+      } else if (items[i].getAsFile) {
+        var f = items[i].getAsFile();
+        if (f) await walkEntry(null, f.name, out, f);
+      }
+    }
+    return out;
+  }
+
+  // readDirInto 把一个目录的内容读进来，prefix 是这些内容对应的相对路径前缀。
+  async function readDirInto(dir, prefix, out) {
+    var reader = dir.createReader();
+    // readEntries 一次只给一批，要反复读到空为止
+    for (;;) {
+      var batch = await new Promise(function (res, rej) { reader.readEntries(res, rej); });
+      if (!batch.length) break;
+      for (var i = 0; i < batch.length; i++) {
+        await walkEntry(batch[i], prefix, out);
+      }
+    }
+  }
+
+  // walkEntry 处理拖入内容里的一个条目。
+  //
+  // prefix 是它所在层级的路径前缀（不含自己的名字），
+  // 自己的名字在这里拼，往上只能拼一次。
+  async function walkEntry(entry, prefix, out, plainFile) {
+    if (!entry) {
+      if (plainFile) out.push({ rel: prefix, file: plainFile });
+      return;
+    }
+    if (entry.isFile) {
+      var f = await new Promise(function (res, rej) { entry.file(res, rej); });
+      out.push({ rel: prefix ? prefix + '/' + f.name : f.name, file: f });
+      return;
+    }
+    if (!entry.isDirectory) return;
+
+    // 内层目录的名字要并进前缀，供它里面的文件使用
+    await readDirInto(entry, prefix ? prefix + '/' + entry.name : entry.name, out);
+  }
+
+  // readAsB64 把文件读成 base64。
+  //
+  // 分块拼接，避免一次性 apply 超长数组把调用栈撑爆（大文件真的会）。
+  async function readAsB64(file) {
+    var buf = await file.arrayBuffer();
+    var bytes = new Uint8Array(buf);
+    var bin = '';
+    var CHUNK = 0x8000;
+    for (var i = 0; i < bytes.length; i += CHUNK) {
+      bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+    }
+    return btoa(bin);
+  }
+
+  // dropInto 处理一次拖放。base 是落点的目录前缀，空串表示站点根。
+  async function dropInto(base, dt) {
+    var items = await collectDrops(dt);
+    if (!items.length) return;
+
+    var planned = items.map(function (it) {
+      return { path: base ? base + '/' + it.rel : it.rel, file: it.file };
+    });
+
+    var clashes = planned.filter(function (p) { return currentPaths[p.path]; });
+    var overwrite = true;
+    if (clashes.length) {
+      var sample = clashes.slice(0, 3).map(function (p) { return p.path; }).join('、');
+      var more = clashes.length > 3 ? ' 等 ' + clashes.length + ' 个' : '';
+      overwrite = confirm(
+        '有 ' + clashes.length + ' 个路径已存在：' + sample + more + '\n\n' +
+        '确定 = 替换它们；取消 = 跳过它们，只写新文件。'
+      );
+    }
+
+    var files = [];
+    for (var i = 0; i < planned.length; i++) {
+      var p = planned[i];
+      if (clashes.length && !overwrite && currentPaths[p.path]) continue;
+      files.push({ path: p.path, bytes: await readAsB64(p.file) });
+    }
+    if (!files.length) { log('全部跳过，没有写入', 'warn'); return; }
+    if (files.length > 100) { log('一批写了 ' + files.length + ' 个文件，可能要等一会'); }
+
+    var res = await api('/api/files/replace', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ site: site, files: files }),
+    });
+    var out = await res.json();
+    if (!res.ok) { log('写入失败：' + (out.error || res.status), 'err'); return; }
+
+    // 逐个报结果：一批里部分失败时，不能只说「写完了」
+    var ok = 0, bad = [];
+    (out.results || []).forEach(function (r) {
+      if (r.error) bad.push(r.path + '（' + r.error + '）');
+      else ok++;
+    });
+    if (ok) log('已写入 ' + ok + ' 个文件', 'ok');
+    if (bad.length) log('有 ' + bad.length + ' 个没写成：\n  ' + bad.join('\n  '), 'err');
+    refresh();
+  }
+
+  // attachPanelDrop 把一块区域变成拖放区，落点由 baseFn() 给出。
+  //
+  // 落点不再是「拖到哪一行上」：那是上一版的思路，很反直觉。
+  // 现在整个面板就是一个落点，拖进来之后要判断的是「重不重名」，
+  // 而那件事与拖到哪个位置无关。
+  function attachPanelDrop(node, baseFn) {
+    node.addEventListener('dragover', function (e) {
+      e.preventDefault();
+      node.classList.add('drop');
+    });
+    node.addEventListener('dragleave', function () { node.classList.remove('drop'); });
+    node.addEventListener('drop', function (e) {
+      e.preventDefault();
+      node.classList.remove('drop');
+      dropInto(baseFn(), e.dataTransfer);
+    });
+  }
+
+  // 最近一次发起的任务参数。失败后「重试」就是拿它原样再发一次。
+  //
+  // 不从输入框重新收集：重试的语义是「刚才那一次再来一遍」，
+  // 用户中途改过的输入不该混进来。要换参数就重新点那个按钮。
+  var lastTask = null;
+
+  // offerRetry 失败后给一个重试按钮。
+  //
+  // 不自动重试：失败原因分两类，网络抖动值得再试，
+  // 「站点里没有文件」这类再试多少次都一样。让用户自己判断。
+  function offerRetry() {
+    if (!lastTask) return;
+    var btn = document.createElement('button');
+    btn.className = 'retry';
+    btn.textContent = '重试';
+    btn.onclick = function () {
+      if (!lastTask) return;
+      // 清掉旧的按钮，免得连点之后堆一列
+      Array.prototype.forEach.call(el('logs').querySelectorAll('button.retry'), function (b) { b.remove(); });
+      runTask(lastTask.url, lastTask.body, lastTask.label, lastTask.opts);
+    };
+    el('logs').appendChild(btn);
+  }
+
+  // 任务跑着的时候把触发按钮都禁掉。
+  //
+  // 打包与发布都不该并发跑：连点两下就是对着同一个目录各干一遍，
+  // 而且两边都以为自己在改同一份东西。后端也有自己的锁，
+  // 但让按钮当场变灰更直接——用户不用等到报错才知道已经在跑了。
+  var BUSY_BUTTONS = ['doPack', 'doPublish', 'doSiteInit', 'doVerify', 'doVerifyRepair'];
+
+  // ---- 面包屑切换卡片 ----
+  //
+  // 五个操作各是一张卡，面包屑就是流程顺序（骨架→打包→发布→检查→恢复），
+  // 一次只亮一张。默认落在「发布」：日常最高频的那一步。
+  var currentStep = 'publish';
+
+  function showStep(step) {
+    Array.prototype.forEach.call(document.querySelectorAll('.panel.step'), function (p) {
+      p.hidden = p.dataset.step !== step;
+    });
+    Array.prototype.forEach.call(el('flowbar').querySelectorAll('a'), function (a) {
+      a.classList.toggle('active', a.dataset.step === step);
+    });
+    currentStep = step;
+  }
+
+  el('flowbar').addEventListener('click', function (e) {
+    var t = e.target;
+    if (t && t.dataset && t.dataset.step) {
+      e.preventDefault();
+      showStep(t.dataset.step);
+    }
+  });
+
+  showStep(currentStep);
+
+  function setBusy(busy) {
+    BUSY_BUTTONS.forEach(function (id) {
+      var b = el(id);
+      if (b) b.disabled = busy;
+    });
+  }
+
+  // 所有耗时操作都走这里：先拿 taskId，再订阅 SSE 看进度。
+  //
+  // opts.sign 为真时同时跑签名循环。这件事必须挂在这里而不是绑在
+  // 「发布」按钮上：重试走的是同一个 runTask，绑在按钮上就会漏掉，
+  // 而后端一直在等签名，用户只看到一句「等待钱包确认」却没有任何反应。
+  async function runTask(url, body, label, opts) {
+    clearLog();
+    log('> ' + label);
+    var o = opts || {};
+    lastTask = { url: url, body: body, label: label, opts: o };
+    setBusy(true);
+
+    if (o.sign) {
+      // 不 await：它要一直跑到任务收尾
+      runSignLoop();
+    }
+
+    var res = await api(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    var out = await res.json();
+    if (!res.ok) {
+      log('发起失败：' + (out.error || res.status), 'err');
+      setBusy(false);
+      return;
+    }
+    if (!out.taskId) {
+      log('后端没有返回 taskId', 'err');
+      setBusy(false);
+      return;
+    }
+    currentTaskId = out.taskId;
+
+    // EventSource 不能自定义请求头，token 只能跟在 URL 上
+    var src = new EventSource('/api/task/' + out.taskId + '/events?token=' + encodeURIComponent(TOKEN));
+    var seen = 0;
+
+    src.onmessage = function (ev) {
+      log(ev.data);
+      seen++;
+    };
+    src.addEventListener('end', function () {
+      src.close();
+      // 任务结束，签名循环也该退了，不然它会一直问一个不再有内容的端点
+      stopSigning();
+      setBusy(false);
+      // 结束后拉一次状态与任务结果
+      api('/api/task/' + out.taskId)
+        .then(function (r) { return r.json(); })
+        .then(function (t) {
+          if (t.status === 'failed') {
+            log('失败：' + (t.error || '未知错误'), 'err');
+            offerRetry();
+          } else {
+            log('完成', 'ok');
+            lastTask = null;
+          }
+          if (o.onResult && t.result) { o.onResult(t.result); }
+          refresh();
+        });
+    });
+    src.onerror = function () { src.close(); setBusy(false); };
+  }
+
+  el('refresh').onclick = refresh;
+  el('connWallet').onclick = connectWallet;
+
+  el('fileUp').onclick = function () {
+    var parts = cwd ? cwd.split('/') : [];
+    parts.pop();
+    enterDir(parts.join('/'));
+  };
+  el('fileCopy').onclick = copySelected;
+  el('filePaste').onclick = pasteClip;
+  el('fileMkdir').onclick = newFolder;
+
+  // 整个面板就是一个拖放区，落点永远是当前目录
+  attachPanelDrop(el('files'), function () { return cwd; });
+
+  // 拖到页面别处时，浏览器默认会直接打开这个文件。一律拦掉。
+  document.addEventListener('dragover', function (e) { e.preventDefault(); });
+  document.addEventListener('drop', function (e) { e.preventDefault(); });
+
+  Array.prototype.forEach.call(el('targetTabs').children, function (btn) {
+    btn.onclick = function () {
+      Array.prototype.forEach.call(el('targetTabs').children, function (b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      activeTarget = btn.dataset.target;
+      el('destLocal').hidden = activeTarget !== 'local';
+      el('destTurbo').hidden = activeTarget !== 'turbo';
+      el('destL1').hidden = activeTarget !== 'l1';
+    };
+  });
+
+  el('doSiteInit').onclick = function () {
+    runTask('/api/site/init', {
+      site: site,
+      template: el('tplSelect').value,
+      overwrite: el('tplOverwrite').checked,
+    }, '铺开站点骨架');
+  };
+
+  el('doPack').onclick = function () {
+    runTask('/api/pack', {
+      source: el('packSource').value.trim(),
+      outDir: el('packOut').value.trim(),
+      name: el('packName').value.trim(),
+      proxy: el('packProxy').value.trim(),
+      rebuild: el('packRebuild').checked,
+    }, '打包');
+  };
+
+  el('doPublish').onclick = function () {
+    runTask('/api/publish', {
+      site: site,
+      target: activeTarget,
+      dest: el('pubDest').value.trim(),
+      endpoint: el('pubEndpoint').value.trim(),
+      node: el('pubNode').value.trim(),
+      proxyMode: el('pubProxyMode').value,
+      proxyUrl: el('pubProxyUrl').value.trim(),
+    }, '发布到 ' + activeTarget, {
+      // 两条 Arweave 路都要钱包签名；本地目录不需要。
+      // 这件事交给 runTask 办，重试时才能一起带上。
+      sign: activeTarget !== 'local',
+    });
+  };
+
+  // ---- 检查与补传 ----
+  //
+  // 全手动：检查只读只报告；清理坏引用要再点一个按钮、过一次确认。
+  // 补传永远走正常发布，这里不接任何自动衔接。
+
+  function runVerify(repair) {
+    var gateways = el('verifyGateways').value.split(/[\s,;]+/).filter(Boolean);
+    runTask(repair ? '/api/verify/repair' : '/api/verify', {
+      site: site,
+      gateways: gateways,
+      from: el('verifyFrom').value.trim(),
+      checkContent: el('verifyContent').checked,
+      proxyMode: el('pubProxyMode').value,
+      proxyUrl: el('pubProxyUrl').value.trim(),
+    }, repair ? '清理坏引用' : '检查链上可读性', {
+      sign: false,
+      onResult: renderVerifyResult,
+    });
+  }
+
+  el('doVerify').onclick = function () { runVerify(false); };
+
+  el('doVerifyRepair').onclick = function () {
+    if (!confirm('把查不到或摘要不符的引用从发布记录里清掉？\n\n清完之后跑一次发布即可补上，这里不会自动发布。')) return;
+    runVerify(true);
+  };
+
+  // renderVerifyResult 把核对报告画成清单。只列有问题的行：
+  // 全部可读时一句话就够，不铺三十行绿字。
+  function renderVerifyResult(result) {
+    var rep = result && result.report;
+    var box = el('verifyResult');
+    box.textContent = '';
+    if (!rep) return;
+
+    var head = document.createElement('div');
+    head.className = 'muted';
+    head.style.margin = '10px 0 6px';
+    head.textContent = '入口 ' + (rep.EntryOK ? '可读' : '不可读') + ' · ' +
+      '可读 ' + rep.OK + '（其中 ' + (rep.GatewayDiff || 0) + ' 条网关有差异）' +
+      '、查不到 ' + rep.Missing + '、摘要不符 ' + rep.Mismatch +
+      '、网关不可达 ' + rep.Unreachable;
+    box.appendChild(head);
+
+    var bad = (rep.Items || []).filter(function (it) { return it.Verdict !== 'ok'; });
+    if (!bad.length) {
+      var all = document.createElement('div');
+      all.className = 'ok';
+      all.textContent = '全部可读，没有需要处理的引用。';
+      box.appendChild(all);
+      return;
+    }
+
+    var labels = { missing: '查不到', mismatch: '摘要不符', unreachable: '网关不可达' };
+    var table = document.createElement('table');
+    table.innerHTML = '<thead><tr><th>结论</th><th>路径</th><th>说明</th></tr></thead>';
+    var tb = document.createElement('tbody');
+    bad.forEach(function (it) {
+      var tr = document.createElement('tr');
+      var td0 = document.createElement('td');
+      var b = document.createElement('span');
+      b.className = 'vbadge ' + (it.Verdict === 'unreachable' ? 'warn' : 'err');
+      b.textContent = labels[it.Verdict] || it.Verdict;
+      td0.appendChild(b);
+      var td1 = document.createElement('td');
+      td1.className = 'mono';
+      td1.textContent = it.Path;
+      var td2 = document.createElement('td');
+      td2.className = 'muted';
+      td2.textContent = it.Detail || '';
+      tr.appendChild(td0); tr.appendChild(td1); tr.appendChild(td2);
+      tb.appendChild(tr);
+    });
+    table.appendChild(tb);
+    box.appendChild(table);
+  }
+
+  // 从链上恢复：把链上的站点内容取回一个空目录。
+  //
+  // 与发布是两件事：发布是往外写，这个是往本地拿回来。
+  el('doRestore').onclick = function () {
+    runTask('/api/restore', {
+      entry: el('restoreEntry').value.trim(),
+      dest: el('restoreDest').value.trim(),
+      gateway: el('restoreGateway').value.trim(),
+      // 代理沿用上面「网络出口」那份：它是整页的设定，
+      // 不该两个面板各填一遍、也不可能填出两个不同的值来。
+      proxyMode: el('pubProxyMode').value,
+      proxyUrl: el('pubProxyUrl').value.trim(),
+    }, '从链上恢复');
+  };
+
+  refresh();
+})();
+</script>
+</body>
+</html>
+`
+
+func (s *Server) handlePage(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = w.Write([]byte(DefaultPage))
+}
