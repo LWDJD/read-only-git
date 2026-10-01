@@ -326,6 +326,61 @@ func TestPartialRecordIsReusable(t *testing.T) {
 }
 
 // 影响 tags 的参数变了，旧引用就不能再用：照旧复用会让未变文件沿用旧标签。
+// 同内容换路径不该再传一份：id 是内容寻址的，旧 id 取回的就是这份字节。
+func TestPublishDedupesSameContentAcrossPaths(t *testing.T) {
+	site1 := writeSite(t, map[string]string{"a.txt": "same-bytes"})
+	up, _ := fakeTurbo(t)
+	target := &Target{Repo: "demo", Uploader: up, Signer: &stubSigner{}}
+	first, err := target.Publish(context.Background(), site1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 第二轮：a.txt 改名成 b.txt，内容一字未变
+	site2 := writeSite(t, map[string]string{"b.txt": "same-bytes"})
+	signer2 := &stubSigner{}
+	target2 := &Target{Repo: "demo", Uploader: up, Signer: signer2}
+	rec, err := target2.Publish(context.Background(), site2, first)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if rec.Refs["b.txt"] != first.Refs["a.txt"] {
+		t.Fatalf("同内容换路径应当复用旧 id：%q != %q", rec.Refs["b.txt"], first.Refs["a.txt"])
+	}
+	// 只有 manifest 需要重签重传，内容一个字节都不动
+	if signer2.count() != 1 {
+		t.Fatalf("只该重签 manifest，实际签了 %d 次", signer2.count())
+	}
+}
+
+// 一轮里两个文件内容相同：只签一份、只传一份，manifest 两个路径指向同一个 id。
+func TestPublishDedupesWithinRun(t *testing.T) {
+	site := writeSite(t, map[string]string{
+		"x.txt": "twin",
+		"y.txt": "twin",
+	})
+	up, count := fakeTurbo(t)
+	signer := &stubSigner{}
+	target := &Target{Repo: "demo", Uploader: up, Signer: signer}
+
+	rec, err := target.Publish(context.Background(), site, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if rec.Refs["x.txt"] != rec.Refs["y.txt"] {
+		t.Fatal("同内容应当共用同一个 id")
+	}
+	// 一份内容 + 一份 manifest，而不是两份内容 + 一份 manifest
+	if signer.count() != 2 {
+		t.Fatalf("同内容只该签一份，实际签了 %d 次", signer.count())
+	}
+	if count() != 2 {
+		t.Fatalf("同内容只该传一份，实际上传 %d 次", count())
+	}
+}
+
 func TestPublishDoesNotReuseWhenLabelsChange(t *testing.T) {
 	site := writeSite(t, map[string]string{"a.txt": "same"})
 

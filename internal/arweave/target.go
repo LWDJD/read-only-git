@@ -130,6 +130,28 @@ func (t *Target) Publish(ctx context.Context, site *publish.Site, prev *publish.
 	}()
 
 	var uploaded, reused int
+
+	// 内容去重索引：摘要 → 已经上过链的 data item id。
+	//
+	// 付费单位是内容字节，按路径匹配只是碰巧的近似：同内容换个路径
+	// （改名、挪目录）就会被当新文件重签重传。id 是内容寻址的
+	// （签名就是内容哈希），同内容的旧 id 取回的就是这份字节。
+	//
+	// 取舍：被复用的那个 item 里 Path 标签停在首次上传时的路径，
+	// 与新路径不一致。manifest 才是寻址真相，标签只是元数据，
+	// 拿它换真金白银的字节是划算的。
+	dedup := make(map[string]string, len(site.Files))
+	if labelsMatch {
+		for p, id := range prev.Refs {
+			d := prev.Files[p]
+			if d != "" && id != "" {
+				if _, ok := dedup[d]; !ok {
+					dedup[d] = id
+				}
+			}
+		}
+	}
+
 	for _, f := range site.Files {
 		if err := ctx.Err(); err != nil {
 			return rec, err
@@ -144,6 +166,15 @@ func (t *Target) Publish(ctx context.Context, site *publish.Site, prev *publish.
 				reused++
 				continue
 			}
+		}
+
+		// 同内容在别处已经上过链（本轮刚签的、或记录里别的路径的）：
+		// 直接共用同一个 id，不再签、不再传第二份字节。
+		if id, ok := dedup[f.Digest]; ok {
+			rec.Files[f.Path] = f.Digest
+			rec.Refs[f.Path] = id
+			reused++
+			continue
 		}
 
 		content, err := site.ReadFile(f.Path)
@@ -163,6 +194,7 @@ func (t *Target) Publish(ctx context.Context, site *publish.Site, prev *publish.
 
 		rec.Files[f.Path] = f.Digest
 		rec.Refs[f.Path] = id
+		dedup[f.Digest] = id
 		uploaded++
 	}
 
